@@ -15,18 +15,23 @@
  */
 
 #pragma once
-#include "websocket_streaming/websocket_client_device_impl.h"
-#include <opendaq/device_ptr.h>
+
+#include <opendaq/data_descriptor_ptr.h>
+
+#include <ws-streaming/metadata.hpp>
+
+#include <websocket_streaming/common.h>
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 
-inline DevicePtr WebsocketClientDevice(const ContextPtr& context,
-                                       const ComponentPtr& parent,
-                                       const StringPtr& localId,
-                                       const StringPtr& connectionString)
-{
-    DevicePtr obj(createWithImplementation<IDevice, WebsocketClientDeviceImpl>(context, parent, localId, connectionString));
-    return obj;
-}
+/*!
+ * @brief Translates WebSocket Streaming metadata to an openDAQ data descriptor.
+ *
+ * @param metadata The WebSocket Streaming metadata to translate.
+ *
+ * @return A WebSocket Streaming metadata object.
+ */
+DataDescriptorPtr metadataToDescriptor(
+    const wss::metadata& metadata);
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING

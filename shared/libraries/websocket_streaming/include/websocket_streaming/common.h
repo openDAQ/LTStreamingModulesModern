@@ -15,21 +15,6 @@
  */
 
 #pragma once
-#include <websocket_streaming_server_module/common.h>
-#include <opendaq/module_impl.h>
 
-BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING_SERVER_MODULE
-
-class WebsocketStreamingServerModule final : public Module
-{
-public:
-    WebsocketStreamingServerModule(ContextPtr context);
-
-    DictPtr<IString, IServerType> onGetAvailableServerTypes() override;
-    ServerPtr onCreateServer(const StringPtr& serverType, const PropertyObjectPtr& serverConfig, const DevicePtr& rootDevice) override;
-
-private:
-    std::mutex sync;
-};
-
-END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING_SERVER_MODULE
+#define BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING namespace daq::websocket_streaming {
+#define END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING }

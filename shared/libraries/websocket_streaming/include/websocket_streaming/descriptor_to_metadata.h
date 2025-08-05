@@ -13,19 +13,29 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
-#include "websocket_streaming/websocket_client_signal_impl.h"
+
+#include <opendaq/data_descriptor_ptr.h>
+#include <opendaq/signal_ptr.h>
+
+#include <ws-streaming/metadata.hpp>
+
+#include <websocket_streaming/common.h>
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 
-inline SignalPtr WebsocketClientSignal(const ContextPtr& ctx,
-                                       const ComponentPtr& parent,
-                                       const StringPtr& streamingId)
-{
-    SignalPtr obj(createWithImplementation<ISignal, WebsocketClientSignalImpl>(ctx,
-                                                                               parent,
-                                                                               streamingId));
-    return obj;
-}
+/*!
+ * @brief Translates an openDAQ data descriptor to WebSocket Streaming metadata.
+ *
+ * @param The signal described by the @p descriptor. This object is used to determine the global
+ *     identifier of the associated domain signal, if any.
+ * @param descriptor The openDAQ data descriptor to translate.
+ *
+ * @return A WebSocket Streaming metadata object.
+ */
+wss::metadata descriptorToMetadata(
+    const SignalPtr& signal,
+    const DataDescriptorPtr& descriptor);
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING

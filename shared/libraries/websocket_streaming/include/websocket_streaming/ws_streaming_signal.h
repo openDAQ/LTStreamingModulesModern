@@ -15,30 +15,38 @@
  */
 
 #pragma once
-#include <opendaq/mirrored_signal_impl.h>
 
-#include "websocket_streaming/websocket_streaming.h"
+#include <opendaq/mirrored_signal_impl.h>
+#include <opendaq/opendaq.h>
+
+#include <websocket_streaming/common.h>
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 
-class WebsocketClientSignalImpl final : public MirroredSignal
+class WsStreamingSignal : public MirroredSignal
 {
-public:
-    explicit WebsocketClientSignalImpl(const ContextPtr& ctx,
-                                       const ComponentPtr& parent,
-                                       const StringPtr& streamingId);
+    public:
 
-    StringPtr onGetRemoteId() const override;
-    Bool onTriggerEvent(const EventPacketPtr& eventPacket) override;
+        explicit WsStreamingSignal(
+            const ContextPtr& context,
+            const ComponentPtr& parent,
+            const StringPtr& streamingId);
 
-protected:
-    SignalPtr onGetDomainSignal() override;
-    DataDescriptorPtr onGetDescriptor() override;
+        StringPtr onGetRemoteId() const override;
 
-private:
-    static StringPtr CreateLocalId(const StringPtr& streamingId);
+        Bool onTriggerEvent(const EventPacketPtr& eventPacket) override;
 
-    StringPtr streamingId;
+    protected:
+
+        SignalPtr onGetDomainSignal() override;
+
+        DataDescriptorPtr onGetDescriptor() override;
+    
+    private:
+    
+        static StringPtr createLocalId(const StringPtr& streamingId);
+
+        StringPtr streamingId;
 };
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
