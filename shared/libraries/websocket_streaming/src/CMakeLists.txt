@@ -1,6 +1,6 @@
 set(BASE_NAME websocket_streaming)
 
-set(LIB_NAME ${SDK_TARGET_NAME}_${BASE_NAME})
+set(LIB_NAME ${OPENDAQ_SDK_TARGET_NAME}_${BASE_NAME})
 
 set(SRC_Cpp
     descriptor_to_metadata.cpp
@@ -27,10 +27,10 @@ set(SRC_PublicHeaders
 )
 
 set(INCLUDE_DIR ../include/websocket_streaming)
-prepend_include(${INCLUDE_DIR} SRC_PublicHeaders)
+opendaq_prepend_include(${INCLUDE_DIR} SRC_PublicHeaders)
 
 add_library(${LIB_NAME} STATIC ${SRC_Cpp} ${SRC_PublicHeaders})
-add_library(${SDK_TARGET_NAMESPACE}::${BASE_NAME} ALIAS ${LIB_NAME})
+add_library(${OPENDAQ_SDK_TARGET_NAMESPACE}::${BASE_NAME} ALIAS ${LIB_NAME})
 
 if(BUILD_64Bit OR BUILD_ARM)
     set_target_properties(${LIB_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)

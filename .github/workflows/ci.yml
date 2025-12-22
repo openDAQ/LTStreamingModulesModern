@@ -1,0 +1,101 @@
+name: Build and Test
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            generator: Ninja
+          - os: windows-latest
+            generator: "Visual Studio 17 2022"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Install additional dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get install -y --no-install-recommends mono-runtime libmono-system-json-microsoft4.0-cil libmono-system-data4.0-cil
+
+      - name: Checkout project repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.event.client_payload.branch || github.ref }}
+
+      - name: Configure project with CMake
+        run: cmake -B build/output -S . -G "${{ matrix.generator }}" -DDAQMODULES_LT_STREAMING_ENABLE_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build project with CMake
+        run: cmake --build build/output --config Debug
+
+      - name: Run project tests with CMake
+        run: ctest --test-dir build/output --output-on-failure -C Debug
+
+  install-build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            generator: Ninja
+          - os: windows-latest
+            generator: "Visual Studio 17 2022"
+
+    runs-on: ${{ matrix.os }}
+    env:
+      INSTALL_PREFIX: ${{ github.workspace }}/opendaq_install
+
+    steps:
+      - name: Install additional dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get install -y --no-install-recommends mono-runtime libmono-system-json-microsoft4.0-cil libmono-system-data4.0-cil
+
+      - name: Checkout module
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.event.client_payload.branch || github.ref }}
+          path: module
+
+      - name: Read openDAQ version
+        shell: bash
+        working-directory: module
+        run: |
+          opendaq_ref=$(cat opendaq_ref)
+          echo "OPENDAQ_REF=$opendaq_ref" >> $GITHUB_ENV
+
+      - name: Checkout openDAQ
+        uses: actions/checkout@v4
+        with:
+          repository: openDAQ/openDAQ
+          ref: ${{ env.OPENDAQ_REF }}
+          path: opendaq
+
+      - name: Configure, build and install openDAQ
+        working-directory: opendaq
+        run: |
+          cmake -B build/output -S . -G "${{ matrix.generator }}" -DOPENDAQ_ENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_PREFIX }}"
+          cmake --build build/output --config Release
+          cmake --install build/output --config Release
+
+      - name: Add DLL path (Windows only)
+        if: matrix.os == 'windows-latest'
+        run: echo "${{ env.INSTALL_PREFIX }}/lib" >> $env:GITHUB_PATH
+
+      - name: Configure project with CMake
+        working-directory: module
+        run: cmake -B build/output -S . -G "${{ matrix.generator }}" -DDAQMODULES_LT_STREAMING_ENABLE_TESTS=ON -DCMAKE_BUILD_TYPE=Release -DopenDAQ_DIR="${{ env.INSTALL_PREFIX }}/lib/cmake/opendaq/"
+
+      - name: Build project with CMake
+        working-directory: module
+        run: cmake --build build/output --config Release
+
+      - name: Run project tests with CMake
+        working-directory: module
+        run: ctest --test-dir build/output --output-on-failure -C Release

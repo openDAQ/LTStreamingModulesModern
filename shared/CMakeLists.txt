@@ -1,8 +1,8 @@
-cmake_minimum_required(VERSION 3.10)
 opendaq_set_cmake_folder_context(TARGET_FOLDER_NAME)
-project(WebsocketStreamingClientModule VERSION ${${REPO_OPTION_PREFIX}_VERSION} LANGUAGES C CXX)
 
 if (MSVC)
+    add_compile_options(/wd4100)
+
     # loss of data / precision, unsigned <--> signed
     #
     # 'argument' : conversion from 'type1' to 'type2', possible loss of data
@@ -14,8 +14,4 @@ if (MSVC)
     add_compile_options(/wd4267)
 endif()
 
-add_subdirectory(src)
-
-if (${REPO_OPTION_PREFIX}_ENABLE_TESTS)
-    add_subdirectory(tests)
-endif()
+add_subdirectory(libraries)

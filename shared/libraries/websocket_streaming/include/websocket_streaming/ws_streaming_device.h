@@ -77,7 +77,8 @@ class WsStreamingDevice : public Device
             const ContextPtr& context,
             const ComponentPtr& parent,
             const StringPtr& localId,
-            const StringPtr& connectionString);
+            const StringPtr& connectionString,
+            const DeviceTypePtr& type);
 
     protected:
 
@@ -96,6 +97,7 @@ class WsStreamingDevice : public Device
             wss::remote_signal_ptr signal);
 
         StringPtr connectionString;
+        DeviceTypePtr deviceType;
         StreamingPtr streaming;
 
         std::list<boost::signals2::scoped_connection> streamingEvents;

@@ -54,9 +54,11 @@ WsStreamingDevice::WsStreamingDevice(
         const ContextPtr& context,
         const ComponentPtr& parent,
         const StringPtr& localId,
-        const StringPtr& connectionString)
+        const StringPtr& connectionString,
+        const DeviceTypePtr& type)
     : Device(context, parent, localId)
     , connectionString(connectionString)
+    , deviceType(type)
 {
     if (!connectionString.assigned())
         DAQ_THROW_EXCEPTION(ArgumentNullException, "connectionString cannot be null");
@@ -89,7 +91,9 @@ void WsStreamingDevice::removed()
 
 DeviceInfoPtr WsStreamingDevice::onGetInfo()
 {
-    return DeviceInfo(connectionString, "WebsocketClientPseudoDevice");
+    auto info = DeviceInfo(connectionString, "WebsocketClientPseudoDevice");
+    info.setDeviceType(deviceType);
+    return info;
 }
 
 void WsStreamingDevice::onSignalAvailable(
