@@ -14,9 +14,10 @@ opendaq_get_version_major_minor_patch("${module_version}" ${REPO_OPTION_PREFIX}_
 if (NOT DEFINED PROJECT_SOURCE_DIR AND OPENDAQ_FORCE_COMPILE_32BIT AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
     opendaq_32bit_build_linux_early_setup()
 endif()
-opendaq_common_early_setup()
 
 project(${REPO_NAME} VERSION ${${REPO_OPTION_PREFIX}_VERSION} LANGUAGES CXX)
+
+opendaq_common_early_setup()
 
 if (PROJECT_IS_TOP_LEVEL)
     message(STATUS "Building ${REPO_NAME} version ${${REPO_OPTION_PREFIX}_VERSION} standalone")
