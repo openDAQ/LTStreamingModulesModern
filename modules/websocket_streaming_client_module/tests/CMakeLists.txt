@@ -8,8 +8,8 @@ set(TEST_SOURCES test_websocket_streaming_client_module.cpp
 add_executable(${TEST_APP} ${TEST_SOURCES}
 )
 
-target_link_libraries(${TEST_APP} PRIVATE daq::test_utils
-                                          ${SDK_TARGET_NAMESPACE}::${MODULE_NAME}
+target_link_libraries(${TEST_APP} PRIVATE daq::opendaq_test_utils gtest
+                                          ${OPENDAQ_SDK_TARGET_NAMESPACE}::${MODULE_NAME}
 )
 
 add_test(NAME ${TEST_APP}
@@ -17,6 +17,6 @@ add_test(NAME ${TEST_APP}
          WORKING_DIRECTORY $<TARGET_FILE_DIR:${TEST_APP}>
 )
 
-if (OPENDAQ_ENABLE_COVERAGE)
+if (COMMAND setup_target_for_coverage AND OPENDAQ_ENABLE_COVERAGE)
     setup_target_for_coverage(${TEST_APP}coverage ${TEST_APP} ${TEST_APP}coverage)
 endif()
