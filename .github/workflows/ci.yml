@@ -103,7 +103,7 @@ jobs:
 
       - name: Run project tests with CMake
         if: matrix.os == 'windows-latest'
-        working-directory: module
+        working-directory: module/build/output
         run: |
           $env:PATH="${{ env.INSTALL_PREFIX }}/lib;$env:PATH"
-          ctest --test-dir build/output --output-on-failure -C Release
+          ctest --output-on-failure -C Release
