@@ -29,7 +29,7 @@ jobs:
           ref: ${{ github.event.inputs.branch || github.event.client_payload.branch || github.ref }}
 
       - name: Configure project with CMake
-        run: cmake -B build/output -S . -G "${{ matrix.generator }}" -DDAQMODULES_LT_STREAMING_ENABLE_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build/output -S . -G "${{ matrix.generator }}" -DDAQMODULES_LT_STREAMING_ENABLE_TESTS=ON -DDAQMODULES_LT_STREAMING_DEBUG_WARNINGS_AS_ERRORS=ON -DCMAKE_BUILD_TYPE=Release
 
       - name: Build project with CMake
         run: cmake --build build/output --config Release
@@ -97,5 +97,13 @@ jobs:
         run: cmake --build build/output --config Debug
 
       - name: Run project tests with CMake
+        if: matrix.os != 'windows-latest'
         working-directory: module
-        run: ctest --test-dir build/output --output-on-failure -C Debug
+        run: ctest --test-dir build/output --output-on-failure -C Release
+
+      - name: Run project tests with CMake
+        if: matrix.os == 'windows-latest'
+        working-directory: module
+        run: |
+          $env:PATH="${{ env.INSTALL_PREFIX }}/lib;$env:PATH"
+          ctest --test-dir build/output --output-on-failure -C Release
