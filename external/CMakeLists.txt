@@ -1,3 +1,5 @@
+opendaq_get_cmake_mode(_LT_STREAMING_CMAKE_MODERN_MODE_SAVED)
+opendaq_set_cmake_mode(ANCIENT)
 set(CMAKE_FOLDER external)
 list(APPEND CMAKE_MESSAGE_CONTEXT external)
 
@@ -9,3 +11,4 @@ endif()
 
 add_subdirectory(ws-streaming EXCLUDE_FROM_ALL)
 
+opendaq_set_cmake_mode(${_LT_STREAMING_CMAKE_MODERN_MODE_SAVED})

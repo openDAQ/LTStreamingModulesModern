@@ -86,7 +86,7 @@ jobs:
 
       - name: Add DLL path (Windows only)
         if: matrix.os == 'windows-latest'
-        run: echo "${{ env.INSTALL_PREFIX }}/lib" >> $env:GITHUB_PATH
+        run: echo "${{ env.INSTALL_PREFIX }}/bin" >> $env:GITHUB_PATH
 
       - name: Configure project with CMake
         working-directory: module
