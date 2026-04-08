@@ -217,6 +217,20 @@
                 "intel-llvm",
                 "ninja"
             ]
+        },
+        {
+            "name": "module",
+            "hidden": true,
+            "cacheVariables": {
+                "DAQMODULES_LT_STREAMING_ENABLE_TESTS": "ON"
+            }
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "module-test",
+            "hidden": true,
+            "configurePreset": "module"
         }
     ]
 }
