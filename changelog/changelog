@@ -6,5 +6,6 @@
 
 ## Misc
 
-- [#2](https://github.com/openDAQ/LTStreamingModulesModern/pull/2) Import files from openDAQ SDK
 - [#1](https://github.com/openDAQ/LTStreamingModulesModern/pull/1) Project initial version.
+- [#2](https://github.com/openDAQ/LTStreamingModulesModern/pull/2) Import files from openDAQ SDK
+- [#8](https://github.com/openDAQ/LTStreamingModulesModern/pull/8) Bumped to 4.0.0 — major version raised to reflect the module's move to a standalone release cycle, decoupled from openDAQ core versioning.
