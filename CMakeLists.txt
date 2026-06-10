@@ -77,3 +77,11 @@ add_subdirectory(external)
 add_subdirectory(shared)
 add_subdirectory(modules)
 
+# Packaging
+opendaq_detect_triplet()
+opendaq_generate_package_name(VERSION "${module_version}")
+set(CPACK_PACKAGE_FILE_NAME "${OPENDAQ_PACKAGE_NAME}")
+set(CPACK_OUTPUT_FILE_PREFIX "${CMAKE_SOURCE_DIR}/build/_packages")
+set(CPACK_GENERATOR TGZ)
+include(CPack)
+
