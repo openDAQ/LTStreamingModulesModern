@@ -156,9 +156,9 @@ void WsStreamingServer::onStopServer()
     // openDAQ can (but probably should not) call onStopServer() more than once.
     if (_thread.joinable())
     {
-        _server.close();
         _ioc.stop();
         _thread.join();
+        _server.close();
     }
 }
 
