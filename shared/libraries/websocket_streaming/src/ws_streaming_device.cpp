@@ -83,9 +83,12 @@ PropertyObjectPtr WsStreamingDevice::createDefaultConfig()
 void WsStreamingDevice::removed()
 {
     streamingEvents.clear();
+}
 
+void WsStreamingDevice::removedNoLock()
+{
     streaming.release();
-
+    auto lock = getRecursiveConfigLock2();
     Device::removed();
 }
 
@@ -101,6 +104,9 @@ void WsStreamingDevice::onSignalAvailable(
     wss::remote_signal_ptr domainSignal,
     const DataDescriptorPtr& descriptor)
 {
+    auto lock = getRecursiveConfigLock2();
+    if (this->objPtr.template asPtr<IRemovable>(true).isRemoved() || !streaming.assigned())
+        return;
     daq::MirroredSignalConfigPtr openDaqDomainSignal;
 
     if (domainSignal)
@@ -134,6 +140,7 @@ void WsStreamingDevice::onSignalAvailable(
 
 void WsStreamingDevice::onSignalUnavailable(wss::remote_signal_ptr signal)
 {
+    auto lock = getRecursiveConfigLock2();
     auto it = streamingSignals.find(signal->id());
     if (it == streamingSignals.end())
         return;
