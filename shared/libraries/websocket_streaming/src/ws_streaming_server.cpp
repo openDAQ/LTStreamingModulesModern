@@ -239,7 +239,8 @@ void WsStreamingServer::createListener(const SignalPtr& signal)
         streamableSignal.listener = createWithImplementation<IInputPortNotifications, WsStreamingListener>(
             this->template thisPtr<ComponentPtr>().getContext(),
             signal,
-            &streamableSignal.localSignal);
+            &streamableSignal.localSignal,
+            _server.executor());
         reinterpret_cast<WsStreamingListener *>(streamableSignal.listener.getObject())->start();
     });
 

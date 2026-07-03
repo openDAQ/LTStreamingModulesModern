@@ -15,6 +15,9 @@
  */
 
 #include <cstdint>
+#include <utility>
+
+#include <boost/asio/post.hpp>
 
 #include <opendaq/opendaq.h>
 
@@ -34,7 +37,8 @@ BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 WsStreamingListener::WsStreamingListener(
         IContext *context,
         ISignal *signal,
-        wss::local_signal *localSignal)
+        wss::local_signal *localSignal,
+        boost::asio::any_io_executor executor)
     : _signal(signal)
     , _port(
         InputPort(
@@ -43,7 +47,11 @@ WsStreamingListener::WsStreamingListener(
             String("ws-streaming")))
     , _lastDescriptor(_signal.getDescriptor())
     , _localSignal(*localSignal)
+    , _executor(std::move(executor))
 {
+    // The listener is constructed on the streaming endpoint's strand (inside the on_subscribed handler)
+    // so touching _localSignal directly here is safe. All later access happens from
+    // packetReceived() on the acquisition thread and is send to _executor instead.
     _localSignal.set_metadata(
         descriptorToMetadata(
             signal,
@@ -109,22 +117,34 @@ void WsStreamingListener::onDataPacketReceived(DataPacketPtr packet)
 
     auto descriptor = packet.getDataDescriptor();
 
+    // wss::local_signal/connection/peer are not thread-safe
+    // packetReceived() runs on the acquisition thread
+    // so marshal every local_signal call onto _executor
     if (descriptor != _lastDescriptor)
     {
-        _localSignal.set_metadata(
-            descriptorToMetadata(
-                _signal,
-                descriptor));
+        auto metadata = descriptorToMetadata(_signal, descriptor);
+        boost::asio::post(
+            _executor,
+            [localSignal = &_localSignal, metadata = std::move(metadata)]()
+            {
+                localSignal->set_metadata(metadata);
+            });
 
         _lastDescriptor = descriptor;
     }
 
     if (packet.getRawDataSize())
-        _localSignal.publish_data(
-            offset,
-            packet.getSampleCount(),
-            packet.getRawData(),
-            packet.getRawDataSize());
+        // Capture the packet by value so its raw buffer stays alive until the handler runs
+        boost::asio::post(
+            _executor,
+            [localSignal = &_localSignal, packet, offset]()
+            {
+                localSignal->publish_data(
+                    offset,
+                    packet.getSampleCount(),
+                    packet.getRawData(),
+                    packet.getRawDataSize());
+            });
 }
 
 void WsStreamingListener::onEventPacketReceived(EventPacketPtr packet)
@@ -138,10 +158,14 @@ void WsStreamingListener::onEventPacketReceived(EventPacketPtr packet)
 
         if (valueDescriptorChanged && newValueDescriptor != _lastDescriptor)
         {
-            _localSignal.set_metadata(
-                descriptorToMetadata(
-                    _signal,
-                    newValueDescriptor));
+            // Marshal onto the streaming endpoint's strand (see onDataPacketReceived).
+            auto metadata = descriptorToMetadata(_signal, newValueDescriptor);
+            boost::asio::post(
+                _executor,
+                [localSignal = &_localSignal, metadata = std::move(metadata)]()
+                {
+                    localSignal->set_metadata(metadata);
+                });
 
             _lastDescriptor = newValueDescriptor;
         }
