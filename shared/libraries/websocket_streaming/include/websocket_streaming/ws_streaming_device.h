@@ -85,6 +85,7 @@ class WsStreamingDevice : public Device
         static PropertyObjectPtr createDefaultConfig();
 
         void removed() override;
+        void removedNoLock() override;
 
         DeviceInfoPtr onGetInfo() override;
 

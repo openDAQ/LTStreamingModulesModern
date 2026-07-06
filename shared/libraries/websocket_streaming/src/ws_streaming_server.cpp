@@ -208,7 +208,7 @@ void WsStreamingServer::createListener(const SignalPtr& signal)
 
         if (domainSignal != it->second.domainSignal)
         {
-            _server.remove_local_signal(it->second.localSignal);
+            _server.remove_local_signal(*it->second.localSignal);
             _localSignals.erase(it);
         }
 
@@ -230,7 +230,7 @@ void WsStreamingServer::createListener(const SignalPtr& signal)
 
     streamableSignal.domainSignal = domainSignal;
 
-    streamableSignal.localSignal.on_subscribed.connect([
+    streamableSignal.localSignal->on_subscribed.connect([
         =,
         &streamableSignal,
         signal_id = signal.getGlobalId().toStdString()
@@ -239,11 +239,12 @@ void WsStreamingServer::createListener(const SignalPtr& signal)
         streamableSignal.listener = createWithImplementation<IInputPortNotifications, WsStreamingListener>(
             this->template thisPtr<ComponentPtr>().getContext(),
             signal,
-            &streamableSignal.localSignal);
+            streamableSignal.localSignal,
+            _server.executor());
         reinterpret_cast<WsStreamingListener *>(streamableSignal.listener.getObject())->start();
     });
 
-    streamableSignal.localSignal.on_unsubscribed.connect([
+    streamableSignal.localSignal->on_unsubscribed.connect([
         =,
         &streamableSignal,
         signal_id = signal.getGlobalId().toStdString()
@@ -252,7 +253,7 @@ void WsStreamingServer::createListener(const SignalPtr& signal)
         streamableSignal.listener.release();
     });
 
-    _server.add_local_signal(streamableSignal.localSignal);
+    _server.add_local_signal(*streamableSignal.localSignal);
 }
 
 void WsStreamingServer::onClientConnected(
@@ -344,7 +345,7 @@ void WsStreamingServer::rescan()
         if (it->second.openDaqSignal.isRemoved())
         {
             auto jt = it++;
-            _server.remove_local_signal(jt->second.localSignal);
+            _server.remove_local_signal(*jt->second.localSignal);
             _localSignals.erase(jt);
         }
 
