@@ -37,7 +37,7 @@ BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 WsStreamingListener::WsStreamingListener(
         IContext *context,
         ISignal *signal,
-        wss::local_signal *localSignal,
+        std::shared_ptr<wss::local_signal> localSignal,
         boost::asio::any_io_executor executor)
     : _signal(signal)
     , _port(
@@ -46,13 +46,13 @@ WsStreamingListener::WsStreamingListener(
             nullptr,
             String("ws-streaming")))
     , _lastDescriptor(_signal.getDescriptor())
-    , _localSignal(*localSignal)
+    , _localSignal(std::move(localSignal))
     , _executor(std::move(executor))
 {
     // The listener is constructed on the streaming endpoint's strand (inside the on_subscribed handler)
     // so touching _localSignal directly here is safe. All later access happens from
     // packetReceived() on the acquisition thread and is send to _executor instead.
-    _localSignal.set_metadata(
+    _localSignal->set_metadata(
         descriptorToMetadata(
             signal,
             _lastDescriptor));
@@ -125,7 +125,7 @@ void WsStreamingListener::onDataPacketReceived(DataPacketPtr packet)
         auto metadata = descriptorToMetadata(_signal, descriptor);
         boost::asio::post(
             _executor,
-            [localSignal = &_localSignal, metadata = std::move(metadata)]()
+            [localSignal = _localSignal, metadata = std::move(metadata)]()
             {
                 localSignal->set_metadata(metadata);
             });
@@ -137,7 +137,7 @@ void WsStreamingListener::onDataPacketReceived(DataPacketPtr packet)
         // Capture the packet by value so its raw buffer stays alive until the handler runs
         boost::asio::post(
             _executor,
-            [localSignal = &_localSignal, packet, offset]()
+            [localSignal = _localSignal, packet, offset]()
             {
                 localSignal->publish_data(
                     offset,
@@ -162,7 +162,7 @@ void WsStreamingListener::onEventPacketReceived(EventPacketPtr packet)
             auto metadata = descriptorToMetadata(_signal, newValueDescriptor);
             boost::asio::post(
                 _executor,
-                [localSignal = &_localSignal, metadata = std::move(metadata)]()
+                [localSignal = _localSignal, metadata = std::move(metadata)]()
                 {
                     localSignal->set_metadata(metadata);
                 });

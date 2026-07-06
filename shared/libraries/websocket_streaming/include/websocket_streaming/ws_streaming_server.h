@@ -115,12 +115,12 @@ class WsStreamingServer : public Server
                     const std::string& name,
                     const wss::metadata& metadata,
                     SignalPtr openDaqSignal)
-                : localSignal(name, metadata)
+                : localSignal(std::make_shared<wss::local_signal>(name, metadata))
                 , openDaqSignal(openDaqSignal)
             {
             }
 
-            wss::local_signal localSignal;
+            std::shared_ptr<wss::local_signal> localSignal;
             SignalPtr openDaqSignal;
             InputPortNotificationsPtr listener;
             SignalPtr domainSignal;
