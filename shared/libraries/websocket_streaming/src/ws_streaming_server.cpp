@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-#include <algorithm>
 #include <functional>
 #include <thread>
 #include <utility>
@@ -31,6 +30,7 @@
 
 #include <ws-streaming/ws-streaming.hpp>
 
+#include <websocket_streaming/constants.h>
 #include <websocket_streaming/descriptor_to_metadata.h>
 #include <websocket_streaming/ws_streaming_listener.h>
 #include <websocket_streaming/ws_streaming_server.h>
@@ -46,13 +46,69 @@ PropertyObjectPtr WsStreamingServer::createDefaultConfig(const ContextPtr& conte
 
     auto defaultConfig = PropertyObject();
 
-    const auto websocketPortProp =
-        IntPropertyBuilder("WebsocketStreamingPort", 7414).setMinValue(minPortValue).setMaxValue(maxPortValue).build();
-    defaultConfig.addProperty(websocketPortProp);
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_WS_STREAMING_PORT, DEFAULT_ENABLE_WS_STREAMING_PORT);
+        defaultConfig.addProperty(builder.build());
+    }
 
-    const auto websocketControlPortProp =
-        IntPropertyBuilder("WebsocketControlPort", 7438).setMinValue(minPortValue).setMaxValue(maxPortValue).build();
-    defaultConfig.addProperty(websocketControlPortProp);
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_WS_CONTROL_PORT, DEFAULT_ENABLE_WS_CONTROL_PORT);
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = IntPropertyBuilder(PROPERTY_WS_STREAMING_PORT, DEFAULT_WS_STREAMING_PORT)
+                           .setMinValue(minPortValue)
+                           .setMaxValue(maxPortValue)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WS_STREAMING_PORT + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = IntPropertyBuilder(PROPERTY_WS_CONTROL_PORT, DEFAULT_WS_CONTROL_PORT)
+                           .setMinValue(minPortValue)
+                           .setMaxValue(maxPortValue)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WS_CONTROL_PORT + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_WSS_STREAMING_PORT, DEFAULT_ENABLE_WSS_STREAMING_PORT);
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_MTLS, DEFAULT_ENABLE_MTLS)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WSS_STREAMING_PORT + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = IntPropertyBuilder(PROPERTY_WSS_STREAMING_PORT, DEFAULT_WSS_STREAMING_PORT)
+                           .setMinValue(minPortValue)
+                           .setMaxValue(maxPortValue)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WSS_STREAMING_PORT + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_CERT_FILE_PATH, DEFAULT_WSS_CERT_FILE_PATH)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WSS_STREAMING_PORT + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_KEY_FILE_PATH, DEFAULT_WSS_KEY_FILE_PATH)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WSS_STREAMING_PORT + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_CA_CERT_FILE_PATH, DEFAULT_WSS_CA_CERT_FILE_PATH)
+                           .setVisible(EvalValue(std::string("($") + PROPERTY_ENABLE_WSS_STREAMING_PORT + " == 1) && ($" +
+                                                 PROPERTY_ENABLE_MTLS + " == 1)"));
+        defaultConfig.addProperty(builder.build());
+    }
 
     defaultConfig.addProperty(StringProperty("Path", "/"));
 
@@ -104,10 +160,38 @@ WsStreamingServer::WsStreamingServer(
     , _ioc{1}
     , _server{_ioc.get_executor()}
 {
-    _port = config.getPropertyValue("WebsocketStreamingPort");
+    _port = config.getPropertyValue(PROPERTY_WS_STREAMING_PORT);
 
-    _server.add_listener(config.getPropertyValue("WebsocketStreamingPort"));
-    _server.add_listener(config.getPropertyValue("WebsocketControlPort"), true);
+    if (config.getPropertyValue(PROPERTY_ENABLE_WS_STREAMING_PORT).asPtr<IBoolean>().getValue(False) == True)
+    {
+        _server.add_listener(config.getPropertyValue(PROPERTY_WS_STREAMING_PORT));
+    }
+    if (config.getPropertyValue(PROPERTY_ENABLE_WS_CONTROL_PORT).asPtr<IBoolean>().getValue(False) == True)
+    {
+        _server.add_listener(config.getPropertyValue(PROPERTY_WS_CONTROL_PORT), true);
+    }
+
+    if (config.getPropertyValue(PROPERTY_ENABLE_WSS_STREAMING_PORT).asPtr<IBoolean>().getValue(False) == True)
+    {
+        std::string ca_cert;
+        if (config.getPropertyValue(PROPERTY_ENABLE_MTLS).asPtr<IBoolean>().getValue(False) == True)
+        {
+            ca_cert = config.getPropertyValue(PROPERTY_WSS_CA_CERT_FILE_PATH).asPtr<IString>().toStdString();
+            if (ca_cert.empty())
+            {
+                DAQ_THROW_EXCEPTION(InvalidParameterException, "Mutual TLS is enabled but CA certificate file path is empty.");
+            }
+        }
+        std::string server_cert = config.getPropertyValue(PROPERTY_WSS_CERT_FILE_PATH).asPtr<IString>().toStdString();
+        std::string server_key = config.getPropertyValue(PROPERTY_WSS_KEY_FILE_PATH).asPtr<IString>().toStdString();
+
+        try {
+            _server.add_tls_listener(config.getPropertyValue(PROPERTY_WSS_STREAMING_PORT), server_cert, server_key, ca_cert);
+        } catch (boost::system::system_error& e) {
+            DAQ_THROW_EXCEPTION(InvalidParameterException, fmt::format("Failed to add TLS listener: {}", e.what()));
+        }
+
+    }
 
     _onClientConnected = _server.on_client_connected.connect(
         std::bind(&WsStreamingServer::onClientConnected, this, _1));
