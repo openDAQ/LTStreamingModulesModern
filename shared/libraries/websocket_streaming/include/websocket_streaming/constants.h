@@ -5,21 +5,23 @@
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 
-// static const char* MODULE_NAME = "OpenDAQMQTTModule";
-// static const char* MODULE_ID = "OpenDAQMQTTModule";
-// static const char* SHORT_MODULE_NAME = "MQTTModule";
+static constexpr const char* PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER = "EnableStreamingPort";
+static constexpr const char* PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER = "EnableControlPort";
+static constexpr const char* PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER = "EnableTlsStreamingPort";
+static constexpr const char* PROPERTY_ENABLE_MTLS_SERVER = "EnableMutualTls";
+static constexpr const char* PROPERTY_WS_STREAMING_PORT_SERVER = "WebsocketStreamingPort";
+static constexpr const char* PROPERTY_WS_CONTROL_PORT_SERVER = "WebsocketControlPort";
+static constexpr const char* PROPERTY_WSS_STREAMING_PORT_SERVER = "TlsWebsocketStreamingPort";
+static constexpr const char* PROPERTY_WSS_CERT_FILE_PATH_SERVER = "CertificateFilePath";
+static constexpr const char* PROPERTY_WSS_KEY_FILE_PATH_SERVER = "KeyFilePath";
+static constexpr const char* PROPERTY_WSS_CA_CERT_FILE_PATH_SERVER = "CaCertificateFilePath";
 
-
-static constexpr const char* PROPERTY_ENABLE_WS_STREAMING_PORT = "EnableStreamingPort";
-static constexpr const char* PROPERTY_ENABLE_WS_CONTROL_PORT = "EnableControlPort";
-static constexpr const char* PROPERTY_ENABLE_WSS_STREAMING_PORT = "EnableTlsStreamingPort";
-static constexpr const char* PROPERTY_ENABLE_MTLS = "EnableMutualTls";
-static constexpr const char* PROPERTY_WS_STREAMING_PORT = "WebsocketStreamingPort";
-static constexpr const char* PROPERTY_WS_CONTROL_PORT = "WebsocketControlPort";
-static constexpr const char* PROPERTY_WSS_STREAMING_PORT = "TlsWebsocketStreamingPort";
-static constexpr const char* PROPERTY_WSS_CERT_FILE_PATH = "CertificateFilePath";
-static constexpr const char* PROPERTY_WSS_KEY_FILE_PATH = "KeyFilePath";
-static constexpr const char* PROPERTY_WSS_CA_CERT_FILE_PATH = "CaCertificateFilePath";
+static constexpr const char* PROPERTY_ENABLE_MTLS_CLIENT = "EnableMutualTls";
+static constexpr const char* PROPERTY_WS_STREAMING_PORT_CLIENT = "Port";            // to not break existing configs this property is named "Port" instead of "WebsocketStreamingPort"
+static constexpr const char* PROPERTY_WSS_STREAMING_PORT_CLIENT = "Port";
+static constexpr const char* PROPERTY_WSS_CERT_FILE_PATH_CLIENT = "CertificateFilePath";
+static constexpr const char* PROPERTY_WSS_KEY_FILE_PATH_CLIENT = "KeyFilePath";
+static constexpr const char* PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT = "CaCertificateFilePath";
 
 
 static constexpr bool DEFAULT_ENABLE_WS_STREAMING_PORT = true;

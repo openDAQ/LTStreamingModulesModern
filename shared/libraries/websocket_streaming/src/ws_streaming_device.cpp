@@ -15,6 +15,7 @@
  */
 
 #include <functional>
+#include "websocket_streaming/constants.h"
 
 #include <opendaq/device_impl.h>
 #include <opendaq/opendaq.h>
@@ -31,7 +32,7 @@ BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 DeviceTypePtr WsStreamingDevice::createOldType()
 {
     return DeviceTypeBuilder()
-        .setId("OpenDAQLTStreamingOld")
+    .setId("OpenDAQLTStreamingOld")
         .setName("Streaming LT enabled pseudo-device")
         .setDescription("Exposes signals from devices streamed using the WebSocket Streaming Protocol")
         .setDefaultConfig(createDefaultConfig())
@@ -42,11 +43,33 @@ DeviceTypePtr WsStreamingDevice::createOldType()
 DeviceTypePtr WsStreamingDevice::createNewType()
 {
     return DeviceTypeBuilder()
-        .setId("OpenDAQLTStreaming")
+    .setId("OpenDAQLTStreaming")
         .setName("Streaming LT enabled pseudo-device")
         .setDescription("Exposes signals from devices streamed using the WebSocket Streaming Protocol")
         .setDefaultConfig(createDefaultConfig())
         .setConnectionStringPrefix("daq.lt")
+        .build();
+}
+
+DeviceTypePtr WsStreamingDevice::createNewSecureType()
+{
+    return DeviceTypeBuilder()
+    .setId("OpenDAQLTStreamingSecure")
+        .setName("Secure streaming LT enabled pseudo-device")
+        .setDescription("Exposes signals from devices streamed using the WebSocket Streaming Protocol and TLS encryption")
+        .setDefaultConfig(createDefaultSecureConfig())
+        .setConnectionStringPrefix("daq.lts")
+        .build();
+}
+
+DeviceTypePtr WsStreamingDevice::createOldSecureType()
+{
+    return DeviceTypeBuilder()
+    .setId("OpenDAQLTStreamingOldSecure")
+        .setName("Secure streaming LT enabled pseudo-device")
+        .setDescription("Exposes signals from devices streamed using the WebSocket Streaming Protocol and TLS encryption")
+        .setDefaultConfig(createDefaultSecureConfig())
+        .setConnectionStringPrefix("daq.wss")
         .build();
 }
 
@@ -55,7 +78,8 @@ WsStreamingDevice::WsStreamingDevice(
         const ComponentPtr& parent,
         const StringPtr& localId,
         const StringPtr& connectionString,
-        const DeviceTypePtr& type)
+        const DeviceTypePtr& type,
+        const PropertyObjectPtr& config)
     : Device(context, parent, localId)
     , connectionString(connectionString)
     , deviceType(type)
@@ -64,7 +88,7 @@ WsStreamingDevice::WsStreamingDevice(
         DAQ_THROW_EXCEPTION(ArgumentNullException, "connectionString cannot be null");
     name = "WebsocketClientPseudoDevice";
 
-    streaming = createWithImplementation<IStreaming, WsStreaming>(connectionString, context);
+    streaming = createWithImplementation<IStreaming, WsStreaming>(connectionString, context, config);
     streaming.setActive(true);
 
     auto& wsStreaming = *reinterpret_cast<WsStreaming *>(streaming.getObject());
@@ -75,9 +99,12 @@ WsStreamingDevice::WsStreamingDevice(
 
 PropertyObjectPtr WsStreamingDevice::createDefaultConfig()
 {
-    auto obj = PropertyObject();
-    obj.addProperty(IntProperty("Port", 7414));
-    return obj;
+    return WsStreaming::createDefaultConfig();
+}
+
+PropertyObjectPtr WsStreamingDevice::createDefaultSecureConfig()
+{
+    return WsStreaming::createDefaultSecureConfig();
 }
 
 void WsStreamingDevice::removed()
@@ -116,8 +143,8 @@ void WsStreamingDevice::onSignalAvailable(
             if (s.getLocalId() == localId)
                 openDaqDomainSignal = s;
         if (!openDaqDomainSignal.assigned())
-            throw NotFoundException(
-                "Streaming signal '" + signal->id() + "' refers to unregistered domain signal '" + domainSignal->id() + "'");
+            DAQ_THROW_EXCEPTION(NotFoundException,
+                "Streaming signal '{}' refers to unregistered domain signal '{}'", signal->id(), domainSignal->id());
     }
 
     auto openDaqSignal = createWithImplementation<IMirroredSignalPrivate, WsStreamingSignal>(

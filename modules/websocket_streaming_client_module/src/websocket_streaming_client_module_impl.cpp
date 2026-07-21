@@ -19,6 +19,8 @@
 #include <regex>
 #include <string>
 #include <utility>
+#include "boost/algorithm/string/replace.hpp"
+#include "websocket_streaming/constants.h"
 
 #include <coretypes/version_info_factory.h>
 #include <opendaq/streaming_type_factory.h>
@@ -70,9 +72,13 @@ DictPtr<IString, IDeviceType> WebsocketStreamingClientModule::onGetAvailableDevi
 
     const auto websocketDeviceType = WsStreamingDevice::createNewType();
     const auto oldWebsocketDeviceType = WsStreamingDevice::createOldType();
+    const auto secureWebsocketDeviceType = WsStreamingDevice::createNewSecureType();
+    const auto oldSecureWebsocketDeviceType = WsStreamingDevice::createOldSecureType();
 
     result.set(websocketDeviceType.getId(), websocketDeviceType);
     result.set(oldWebsocketDeviceType.getId(), oldWebsocketDeviceType);
+    result.set(secureWebsocketDeviceType.getId(), secureWebsocketDeviceType);
+    result.set(oldSecureWebsocketDeviceType.getId(), oldSecureWebsocketDeviceType);
 
     return result;
 }
@@ -82,8 +88,10 @@ DictPtr<IString, IStreamingType> WebsocketStreamingClientModule::onGetAvailableS
     auto result = Dict<IString, IStreamingType>();
 
     auto websocketStreamingType = WsStreaming::createType();
+    auto secureWebsocketStreamingType = WsStreaming::createSecureType();
 
     result.set(websocketStreamingType.getId(), websocketStreamingType);
+    result.set(secureWebsocketStreamingType.getId(), secureWebsocketStreamingType);
 
     return result;
 }
@@ -104,49 +112,35 @@ DevicePtr WebsocketStreamingClientModule::onCreateDevice(const StringPtr& connec
     // We don't create any streaming objects here since the
     // internal streaming object is always created within the device
 
-    const StringPtr strPtr = formConnectionString(connectionString, config);
-    const std::string str = strPtr;
+    ConnectionParameters params;
+    const StringPtr formedConnectionStr = formConnectionString(connectionString, config, &params);
+
+    PropertyObjectPtr deviceConfig = config;
+    if (!deviceConfig.assigned())
+        deviceConfig = isSecureConnection(formedConnectionStr) ? WsStreamingDevice::createDefaultSecureConfig()
+                                                               : WsStreamingDevice::createDefaultConfig();
 
     std::scoped_lock lock(sync);
 
     std::string localId = fmt::format("websocket_pseudo_device{}", deviceIndex++);
-    auto deviceType = WsStreamingDevice::createNewType();
+    auto deviceType =
+        isSecureConnection(formedConnectionStr) ? WsStreamingDevice::createNewSecureType() : WsStreamingDevice::createNewType();
     checkErrorInfo(deviceType.asPtr<IComponentTypePrivate>()->setModuleInfo(moduleInfo));
-    auto device = createWithImplementation<IDevice, WsStreamingDevice>(context, parent, localId, strPtr, deviceType);
+    auto device = createWithImplementation<IDevice, WsStreamingDevice>(context, parent, localId, formedConnectionStr, deviceType, deviceConfig);
 
     // Set the connection info for the device
-    auto host = String("");
-    auto port = -1;
-    {
-        std::smatch match;
+    StreamingTypePtr wsStreamingType =
+        (isSecureConnection(formedConnectionStr)) ? WsStreaming::createSecureType() : WsStreaming::createType();
 
-        bool parsed = false;
-        parsed = std::regex_search(str, match, RegexIpv6Hostname);
-        if (!parsed)
-        {
-            parsed = std::regex_search(str, match, RegexIpv4Hostname);
-        }
-
-        if (parsed)
-        {
-            host = match[2].str();
-            port = 7414;
-            if (match[3].matched)
-                port = std::stoi(match[3]);
-        }
-    }
-
-    // Set the connection info for the device
-    auto wsStreamingType = WsStreaming::createType();
     ServerCapabilityConfigPtr connectionInfo = device.getInfo().getConfigurationConnectionInfo();
     connectionInfo.setProtocolId(wsStreamingType.getId());
     connectionInfo.setProtocolName(wsStreamingType.getId());
     connectionInfo.setProtocolType(ProtocolType::Streaming);
     connectionInfo.setConnectionType("TCP/IP");
-    connectionInfo.addAddress(host);
-    connectionInfo.setPort(port);
+    connectionInfo.addAddress(params.host);
+    connectionInfo.setPort(params.port);
     connectionInfo.setPrefix(wsStreamingType.getConnectionStringPrefix());
-    connectionInfo.setConnectionString(strPtr);
+    connectionInfo.setConnectionString(formedConnectionStr);
 
     return device;
 }
@@ -154,9 +148,13 @@ DevicePtr WebsocketStreamingClientModule::onCreateDevice(const StringPtr& connec
 bool WebsocketStreamingClientModule::acceptsConnectionParameters(const StringPtr& connectionString, const PropertyObjectPtr& /*config*/)
 {
     std::string connStr = connectionString;
-    auto found = connStr.find(WsStreamingDevice::createOldType().getConnectionStringPrefix().toStdString() + "://") == 0
-        || connStr.find(WsStreamingDevice::createNewType().getConnectionStringPrefix().toStdString() + "://") == 0;
-    return found;
+    const auto deviceTypes = onGetAvailableDeviceTypes();
+    for (const auto& [_, deviceType] : deviceTypes)
+    {
+        if (connStr.find(deviceType.getConnectionStringPrefix().toStdString() + "://") == 0)
+            return true;
+    }
+    return false;
 }
 
 bool WebsocketStreamingClientModule::acceptsStreamingConnectionParameters(const StringPtr& connectionString, const PropertyObjectPtr& config)
@@ -176,8 +174,14 @@ StreamingPtr WebsocketStreamingClientModule::onCreateStreaming(const StringPtr& 
     if (!acceptsStreamingConnectionParameters(connectionString, config))
         DAQ_THROW_EXCEPTION(InvalidParameterException);
 
-    const StringPtr str = formConnectionString(connectionString, config);
-    return createWithImplementation<IStreaming, WsStreaming>(str, context);
+    PropertyObjectPtr streamingConfig = config;
+    if (!streamingConfig.assigned())
+        streamingConfig = isSecureConnection(formNewStyleConnectionString(connectionString).toStdString())
+                              ? WsStreaming::createDefaultSecureConfig()
+                              : WsStreaming::createDefaultConfig();
+
+    const StringPtr str = formConnectionString(connectionString, streamingConfig);
+    return createWithImplementation<IStreaming, WsStreaming>(str, context, streamingConfig);
 }
 
 Bool WebsocketStreamingClientModule::onCompleteServerCapability(const ServerCapabilityPtr& source, const ServerCapabilityConfigPtr& target)
@@ -204,9 +208,9 @@ Bool WebsocketStreamingClientModule::onCompleteServerCapability(const ServerCapa
     auto port = target.getPort();
     if (port == -1)
     {
-        port = 7414;
+        port = DEFAULT_WS_STREAMING_PORT;
         target.setPort(port);
-        LOG_W("LT server capability is missing port. Defaulting to 7414.")
+        LOG_W("LT server capability is missing port. Defaulting to {}", std::to_string(DEFAULT_WS_STREAMING_PORT))
     }
 
     const auto path = target.hasProperty("Path") ? target.getPropertyValue("Path") : "";
@@ -245,28 +249,19 @@ StringPtr WebsocketStreamingClientModule::createUrlConnectionString(const String
         + fmt::format("://{}:{}{}", host, port, path));
 }
 
-PropertyObjectPtr WebsocketStreamingClientModule::createDefaultConfig()
+StringPtr WebsocketStreamingClientModule::formConnectionString(const StringPtr& connectionString,
+                                                               const PropertyObjectPtr& config,
+                                                               ConnectionParameters* outParams)
 {
-    auto obj = PropertyObject();
-    obj.addProperty(IntProperty("Port", 7414));
-    return obj;
-}
-
-StringPtr WebsocketStreamingClientModule::formConnectionString(const StringPtr& connectionString, const PropertyObjectPtr& config)
-{
-    int port = 7414;   
-    if (config.assigned() && config.hasProperty("Port"))
-        port = config.getPropertyValue("Port");
-
-    std::string urlString = connectionString.toStdString();
+    std::string urlString = formNewStyleConnectionString(connectionString).toStdString();
+    bool isSecure = isSecureConnection(urlString);
+    bool portFromConfig = false;
     std::smatch match;
+    ConnectionParameters localParams;
+    if (outParams == nullptr)
+        outParams = &localParams;
 
-    std::string host = "";
-    std::string prefix = "";
-    std::string path = "/";
-
-    bool parsed = false;
-    parsed = std::regex_search(urlString, match, RegexIpv6Hostname);
+    bool parsed = std::regex_search(urlString, match, RegexIpv6Hostname);
     if (!parsed)
     {
         parsed = std::regex_search(urlString, match, RegexIpv4Hostname);
@@ -274,22 +269,45 @@ StringPtr WebsocketStreamingClientModule::formConnectionString(const StringPtr& 
 
     if (parsed)
     {
-        prefix = match[1];
-        host = match[2];
+        outParams->prefix = match[1];
+        outParams->host = match[2];
 
         if (match[3].matched)
-            port = std::stoi(match[3]);
-        
-        if (port == 7414)
-            return connectionString;
+            outParams->port = std::stoi(match[3]);
 
         if (match[4].matched)
-            path = match[4];
+            outParams->path = match[4];
 
-        return prefix + host + ":" + std::to_string(port) + path;
+        if (outParams->port == 0 && config.assigned())
+        {
+            if (portFromConfig = (isSecure && config.hasProperty(PROPERTY_WSS_STREAMING_PORT_CLIENT)))
+                outParams->port = config.getPropertyValue(PROPERTY_WSS_STREAMING_PORT_CLIENT);
+            else if (portFromConfig = (!isSecure && config.hasProperty(PROPERTY_WS_STREAMING_PORT_CLIENT)))
+                outParams->port = config.getPropertyValue(PROPERTY_WS_STREAMING_PORT_CLIENT);
+        }
+
     }
+    else
+    {
+        DAQ_THROW_EXCEPTION(InvalidParameterException, "Could not parse connection string: {}", connectionString);
+    }
+    if (outParams->port == 0)
+        outParams->port = isSecure ? DEFAULT_WSS_STREAMING_PORT : DEFAULT_WS_STREAMING_PORT;
 
-    return connectionString;
+    std::string output = outParams->prefix + outParams->host;
+    if (match[3].matched || portFromConfig)
+        output += ":" + std::to_string(outParams->port);
+    if (match[4].matched)
+        output += outParams->path;
+    return output;
+}
+
+StringPtr WebsocketStreamingClientModule::formNewStyleConnectionString(const StringPtr& connectionString)
+{
+    auto wsConnectionString = connectionString.toStdString();
+    boost::replace_all(wsConnectionString, "daq.ws://", "daq.lt://");
+    boost::replace_all(wsConnectionString, "daq.wss://", "daq.lts://");
+    return wsConnectionString;
 }
 
 DeviceInfoPtr WebsocketStreamingClientModule::populateDiscoveredDevice(const MdnsDiscoveredDevice& discoveredDevice)
@@ -345,6 +363,12 @@ DeviceInfoPtr WebsocketStreamingClientModule::populateDiscoveredDevice(const Mdn
         discoveredDevice,
         cap,
         WsStreamingDevice::createNewType());
+}
+
+bool WebsocketStreamingClientModule::isSecureConnection(const std::string& connectionString)
+{
+    const auto securePrefix = WsStreaming::createSecureType().getConnectionStringPrefix().toStdString() + "://";
+    return connectionString.find(securePrefix) != std::string::npos;
 }
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING_CLIENT_MODULE

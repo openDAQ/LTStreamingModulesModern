@@ -79,6 +79,17 @@ class WsStreaming : public Streaming
          */
         static StreamingTypePtr createType();
 
+        /*!
+         * @brief Creates an openDAQ streaming type object using the `daq.lts://` prefix
+         * with secure TLS channel.
+         *
+         * @return An openDAQ streaming type object using the `daq.lts://` prefix.
+         */
+        static StreamingTypePtr createSecureType();
+
+        static PropertyObjectPtr createDefaultConfig();
+        static PropertyObjectPtr createDefaultSecureConfig();
+
     public:
 
         /*!
@@ -91,7 +102,8 @@ class WsStreaming : public Streaming
          */
         explicit WsStreaming(
             const StringPtr& connectionString,
-            const ContextPtr& context);
+            const ContextPtr& context,
+            const PropertyObjectPtr& config);
 
         /*!
          * @brief Destroys a streaming object and stops the Boost.Asio I/O context's thread.
@@ -125,8 +137,6 @@ class WsStreaming : public Streaming
         > onSignalUnavailable;
 
     protected:
-
-        static PropertyObjectPtr createDefaultConfig();
 
         void onSetActive(bool active) override;
         void onAddSignal(const MirroredSignalConfigPtr& signal) override;

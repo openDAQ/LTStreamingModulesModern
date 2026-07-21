@@ -21,6 +21,7 @@
 #include <string>
 
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/asio/ssl/error.hpp>
 #include <boost/endian/conversion.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -29,6 +30,7 @@
 
 #include <ws-streaming/connection.hpp>
 #include <ws-streaming/remote_signal.hpp>
+#include "websocket_streaming/constants.h"
 
 #include <websocket_streaming/common.h>
 #include <websocket_streaming/metadata_to_descriptor.h>
@@ -49,18 +51,85 @@ StreamingTypePtr WsStreaming::createType()
         .build();
 }
 
+StreamingTypePtr WsStreaming::createSecureType()
+{
+    return StreamingTypeBuilder()
+    .setId("OpenDAQLTStreamingSecure")
+        .setName("openDAQ WebSocket Streaming")
+        .setDescription("Streaming from devices using the WebSocket Streaming Protocol and TLS encryption")
+        .setDefaultConfig(createDefaultSecureConfig())
+        .setConnectionStringPrefix("daq.lts")
+        .build();
+}
+
 WsStreaming::WsStreaming(
         const StringPtr& connectionString,
-        const ContextPtr& context)
+        const ContextPtr& context,
+        const PropertyObjectPtr& config)
     : Streaming(connectionString, context, true)
     , ioContext{1}
     , wsClient(ioContext.get_executor())
 {
+    // NOTE! The 'port' property is not used there. The formed 'connectionString'
+    // must contain the port number.
+
     // The ws-streaming library wants a URL like ws://1.2.3.4:7418/foo.
-    // So we simply need to replace the daq.lt:// prefix with ws://.
+    // So we simply need to replace the daq.lt:// prefix with ws://
+    // and daq.lts:// with wss:// for secure channel
     auto wsConnectionString = connectionString.toStdString();
     boost::replace_all(wsConnectionString, "daq.lt://", "ws://");
     boost::replace_all(wsConnectionString, "daq.ws://", "ws://");
+    boost::replace_all(wsConnectionString, "daq.lts://", "wss://");
+    boost::replace_all(wsConnectionString, "daq.wss://", "wss://");
+    bool isSecureChannel = wsConnectionString.find("wss://") != std::string::npos;
+
+    if (isSecureChannel)
+    {
+        LOG_I("Secure channel requested, enabling TLS");
+
+        std::string certFilePath;
+        std::string keyFilePath;
+        std::string caCertFilePath;
+        if (config.hasProperty(PROPERTY_ENABLE_MTLS_CLIENT) && config.getPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT).asPtr<IBoolean>() == True)
+        {
+            if (!config.hasProperty(PROPERTY_WSS_CERT_FILE_PATH_CLIENT) || !config.hasProperty(PROPERTY_WSS_KEY_FILE_PATH_CLIENT))
+                DAQ_THROW_EXCEPTION(InvalidParameterException,
+                    "Mutual TLS is enabled but the configuration has no {} or {} property",
+                    PROPERTY_WSS_CERT_FILE_PATH_CLIENT, PROPERTY_WSS_KEY_FILE_PATH_CLIENT);
+
+            certFilePath = config.getPropertyValue(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+            keyFilePath = config.getPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+
+            if (certFilePath.empty() || keyFilePath.empty())
+                DAQ_THROW_EXCEPTION(InvalidParameterException, "TLS certificate or key file path is not configured");
+
+            LOG_I("mTLS enabled, using cert file: \'{}\' and key file: \'{}\'", certFilePath, keyFilePath);
+        }
+        else
+        {
+            LOG_I("mTLS disabled");
+        }
+        if (!config.hasProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT))
+            DAQ_THROW_EXCEPTION(InvalidParameterException,
+                "A secure connection requires the {} property in the configuration",
+                PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT);
+
+        caCertFilePath = config.getPropertyValue(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+        if (caCertFilePath.empty())
+            DAQ_THROW_EXCEPTION(InvalidParameterException, "TLS CA certificate file path is not configured");
+
+        LOG_I("Using CA certificate file: \'{}\'", caCertFilePath);
+        LOG_I("Trying to load TLS secrets...");
+
+        try
+        {
+            wsClient.enable_tls(caCertFilePath, certFilePath, keyFilePath);
+        }
+        catch (const std::exception& e)
+        {
+            DAQ_THROW_EXCEPTION(InvalidParameterException, "Cannot load the TLS secrets: {}", e.what());
+        }
+    }
 
     // Start the ws-streaming connection attempt.
     LOG_I("Connecting to {}", wsConnectionString);
@@ -78,8 +147,15 @@ WsStreaming::WsStreaming(
     {
         ioContext.stop();
         thread.join();
-        throw NotFoundException(
-            "Failed to connect to " + connectionString.toStdString() + ": " + std::to_string(ec.value()));
+
+        // A failure raised by the TLS layer means the peer was reached but not trusted.
+        // That is an authentication problem.
+        if (ec.category() == boost::asio::error::get_ssl_category())
+            DAQ_THROW_EXCEPTION(AuthenticationFailedException,
+                "Failed to connect to {}: {}", connectionString.toStdString(), ec.message());
+
+        DAQ_THROW_EXCEPTION(NotFoundException,
+            "Failed to connect to {}: {}", connectionString.toStdString(), ec.message());
     }
 }
 
@@ -96,8 +172,47 @@ WsStreaming::~WsStreaming()
 PropertyObjectPtr WsStreaming::createDefaultConfig()
 {
     auto obj = PropertyObject();
-    obj.addProperty(IntProperty("Port", 7414));
+    obj.addProperty(IntProperty(PROPERTY_WS_STREAMING_PORT_CLIENT, DEFAULT_WS_STREAMING_PORT));
     return obj;
+}
+
+PropertyObjectPtr WsStreaming::createDefaultSecureConfig()
+{
+    constexpr Int minPortValue = 0;
+    constexpr Int maxPortValue = 65535;
+
+    auto defaultConfig = PropertyObject();
+
+    {
+        auto builder = IntPropertyBuilder(PROPERTY_WSS_STREAMING_PORT_CLIENT, DEFAULT_WSS_STREAMING_PORT)
+                           .setMinValue(minPortValue)
+                           .setMaxValue(maxPortValue);
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_MTLS_CLIENT, DEFAULT_ENABLE_MTLS);
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_CERT_FILE_PATH_CLIENT, DEFAULT_WSS_CERT_FILE_PATH)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_MTLS_CLIENT + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_KEY_FILE_PATH_CLIENT, DEFAULT_WSS_KEY_FILE_PATH)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_MTLS_CLIENT + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT, DEFAULT_WSS_CA_CERT_FILE_PATH);
+        defaultConfig.addProperty(builder.build());
+    }
+
+    return defaultConfig;
 }
 
 void WsStreaming::onSetActive(bool active)

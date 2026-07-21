@@ -38,12 +38,24 @@ public:
     Bool onCompleteServerCapability(const ServerCapabilityPtr& source, const ServerCapabilityConfigPtr& target) override;
 
 private:
+    struct ConnectionParameters
+    {
+        std::string host;
+        std::uint16_t port = 0;
+        std::string prefix;
+        std::string path;
+    };
+
     static StringPtr createUrlConnectionString(const StringPtr& host,
                                                const IntegerPtr& port,
                                                const StringPtr& path);
-    static PropertyObjectPtr createDefaultConfig();
-    static StringPtr formConnectionString(const StringPtr& connectionString, const PropertyObjectPtr& config);
+    static StringPtr formConnectionString(const StringPtr& connectionString,
+                                          const PropertyObjectPtr& config,
+                                          ConnectionParameters* outParams = nullptr);
+    static StringPtr formNewStyleConnectionString(const StringPtr& connectionString);
     static DeviceInfoPtr populateDiscoveredDevice(const discovery::MdnsDiscoveredDevice& discoveredDevice);
+    static bool isSecureConnection(const std::string& connectionString);
+
 
     std::mutex sync;
     size_t deviceIndex;
