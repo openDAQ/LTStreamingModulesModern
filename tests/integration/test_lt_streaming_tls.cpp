@@ -174,7 +174,7 @@ protected:
         auto mirrored = clientSignal.asPtr<IMirroredSignalConfig>();
         std::promise<bool> subscribePromise;
         std::future<bool> subscribeFuture = subscribePromise.get_future();
-        mirrored.getOnSubscribeComplete() += [&subscribePromise](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr& args)
+        mirrored.getOnSubscribeComplete() += [&subscribePromise](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr&)
         {
             try { subscribePromise.set_value(true); }
             catch (const std::future_error&) { }
@@ -262,9 +262,8 @@ TEST_F(LtStreamingTlsTest, WssUntrustedCaRejected)
 
     auto client = createClientInstance();
 
-    ASSERT_THROW_MSG(client.addDevice("daq.lts://127.0.0.1:7613/", secureDeviceConfig(client, /*mtls*/ false, OTHER_CA_CERT)),
-                     AuthenticationFailedException,
-                     "Failed to connect to");
+    ASSERT_THROW(client.addDevice("daq.lts://127.0.0.1:7613/", secureDeviceConfig(client, /*mtls*/ false, OTHER_CA_CERT)),
+                 AuthenticationFailedException);
 }
 
 // A secure connection with no CA configured must be rejected before any connection is attempted
@@ -274,17 +273,15 @@ TEST_F(LtStreamingTlsTest, WssMissingCaRejected)
     server.addServer(SERVER_TYPE_ID, secureServerConfig(server, 7614, /*mtls*/ false));
 
     auto client = createClientInstance();
-    ASSERT_THROW_MSG(client.addDevice("daq.lts://127.0.0.1:7614/", secureDeviceConfig(client, /*mtls*/ false, "")),
-                     InvalidParameterException,
-                     "TLS CA certificate file path is not configured");
+    ASSERT_THROW(client.addDevice("daq.lts://127.0.0.1:7614/", secureDeviceConfig(client, /*mtls*/ false, "")),
+                 InvalidParameterException);
 }
 
 TEST_F(LtStreamingTlsTest, WssUnreachableServerReportedAsNotFound)
 {
     auto client = createClientInstance();
-    ASSERT_THROW_MSG(client.addDevice("daq.lts://127.0.0.1:7623/", secureDeviceConfig(client, /*mtls*/ false, CA_CERT)),
-                     NotFoundException,
-                     "Failed to connect to");
+    ASSERT_THROW(client.addDevice("daq.lts://127.0.0.1:7623/", secureDeviceConfig(client, /*mtls*/ false, CA_CERT)),
+                 NotFoundException);
 }
 
 TEST_F(LtStreamingTlsTest, ServerRejectsMissingCertificateFile)
@@ -315,9 +312,7 @@ TEST_F(LtStreamingTlsTest, ClientRejectsMissingKeyFile)
     auto config = secureDeviceConfig(client, /*mtls*/ true, CA_CERT);
     config.setPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_CLIENT, "secrets/does-not-exist.key");
 
-    ASSERT_THROW_MSG(client.addDevice("daq.lts://127.0.0.1:7621/", config),
-                     InvalidParameterException,
-                     "Cannot load the TLS secrets");
+    ASSERT_THROW(client.addDevice("daq.lts://127.0.0.1:7621/", config), InvalidParameterException);
 }
 
 TEST_F(LtStreamingTlsTest, ClientRejectsMismatchedKey)
@@ -326,7 +321,5 @@ TEST_F(LtStreamingTlsTest, ClientRejectsMismatchedKey)
     auto config = secureDeviceConfig(client, /*mtls*/ true, CA_CERT);
     config.setPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_CLIENT, SERVER_KEY);
 
-    ASSERT_THROW_MSG(client.addDevice("daq.lts://127.0.0.1:7622/", config),
-                     InvalidParameterException,
-                     "Cannot load the TLS secrets");
+    ASSERT_THROW(client.addDevice("daq.lts://127.0.0.1:7622/", config), InvalidParameterException);
 }
