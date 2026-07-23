@@ -12,13 +12,54 @@ on:
 jobs:
   call-opendaq-reusable:
     name: LT Streaming Modern
-    uses: openDAQ/openDAQ-CI/.github/workflows/reusable.yml@v1
+    uses: openDAQ/openDAQ-CI/.github/workflows/reusable.yml@v2
     with:
       opendaq-ref: ${{ github.event.inputs.opendaq-ref || '' }}
+      include-jobs: >
+        [
+          "windows-2022-x86-msvs-v143-release",
+          "windows-2022-x86_64-msvs-v143-debug",
+          "ubuntu-20.04-x86-ninja-gcc-7-release",
+          "ubuntu-20.04-x86_64-ninja-clang-9-release",
+          "ubuntu-24.04-x86_64-ninja-gcc-14-debug",
+          "ubuntu-24.04-x86_64-ninja-gcc-14-release",
+          "ubuntu-24.04-x86_64-ninja-clang-18-release",
+          "macos-15-x86_64-ninja-appleclang-release",
+          "macos-26-x86_64-ninja-appleclang-debug",
+          "macos-26-armv8-ninja-appleclang-release"
+        ]
+      packages: >
+        [
+          {
+            "match-jobs": ["ubuntu-*-x86_64-*"],
+            "apt-install": ["libssl-dev"]
+          },
+          {
+            "match-jobs": ["ubuntu-*-x86-*"],
+            "apt-install": ["libssl-dev:i386", "lld", "libx11-dev:i386", "libxi-dev:i386", "libxcursor-dev:i386", "libxrandr-dev:i386", "libgl-dev:i386", "libudev-dev:i386", "libfreetype6-dev:i386"]
+          },
+          {
+            "match-jobs": ["windows-*-x86-*"],
+            "run": "vcpkg install openssl:x86-windows"
+          }
+        ]
       cmake-presets: >
         [
           {
             "configure-preset": "module",
             "test-preset": "module-test"
+          },
+          {
+            "match-jobs": ["windows-*-x86-*"],
+            "cache-variables": { "OPENSSL_ROOT_DIR": "C:/vcpkg/installed/x86-windows" }
+          },
+          {
+            "match-jobs": ["ubuntu-*-x86-*"],
+            "cache-variables": {
+              "OPENDAQ_FORCE_COMPILE_32BIT": true,
+              "OPENDAQ_GENERATE_PYTHON_BINDINGS": false,
+              "OPENDAQ_GENERATE_CSHARP_BINDINGS": false,
+              "CMAKE_CXX_FLAGS_INIT": "-Wno-error=shift-count-overflow"
+            }
           }
         ]
