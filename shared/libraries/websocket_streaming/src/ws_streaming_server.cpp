@@ -18,6 +18,7 @@
 #include <thread>
 #include <utility>
 
+#include <boost/asio/post.hpp>
 #include <boost/system/error_code.hpp>
 
 #include <opendaq/connected_client_info.h>
@@ -247,9 +248,12 @@ void WsStreamingServer::onStopServer()
     // openDAQ can (but probably should not) call onStopServer() more than once.
     if (_thread.joinable())
     {
-        _ioc.stop();
+        // Close the ws-streaming server on its own I/O thread (it is not thread-safe): this cancels
+        // the listeners' pending accepts and closes every client connection, letting _ioc.run()
+        // drain and return so the thread can be joined.
+
+        boost::asio::post(_ioc, [this] { _server.close(); });
         _thread.join();
-        _server.close();
     }
 }
 

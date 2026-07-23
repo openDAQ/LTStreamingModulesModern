@@ -21,6 +21,7 @@
 #include <string>
 
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/ssl/error.hpp>
 #include <boost/endian/conversion.hpp>
 #include <boost/system/error_code.hpp>
@@ -136,8 +137,9 @@ WsStreaming::WsStreaming(
     wsClient.async_connect(wsConnectionString,
         std::bind(&WsStreaming::onConnected, this, _1, _2));
 
-    // Start a background thread to pump the Boost.Asio I/O context. The run() function will
-    // return when there is no more work or when ioContext.stop() is called in the destructor.
+    // Start a background thread to pump the Boost.Asio I/O context. The run() function returns
+    // when there is no more work: on the failed-connection path below via ioContext.stop(), and
+    // during normal teardown once the destructor closes the connection and the work drains.
     thread = std::thread{[this] { ioContext.run(); }};
 
     // Wait here until the connection is either established or failed.
@@ -161,12 +163,20 @@ WsStreaming::WsStreaming(
 
 WsStreaming::~WsStreaming()
 {
-    // Stop the Boost.Asio I/O context (which may already have stopped naturally if the connection
-    // failed and there is no more scheduled work) so we can join and destroy the thread.
-    LOG_I("Stopping Boost.Asio I/O context thread");
-    ioContext.stop();
+    LOG_I("Closing streaming connection and stopping Boost.Asio I/O context thread");
+
+    // Tear the connection down gracefully. The ws-streaming peer is not thread-safe and must be
+    // touched only from the I/O context's thread, so close() is dispatched onto that thread rather
+    // than called directly. Closing cancels the outstanding read/write operations, which lets
+    // ioContext.run() drain its remaining work and return on its own; the thread then joins.
+
+    boost::asio::post(ioContext, [this]
+    {
+        if (wsConnection)
+            wsConnection->close();
+    });
+
     thread.join();
-    wsConnection->close();
 }
 
 PropertyObjectPtr WsStreaming::createDefaultConfig()
