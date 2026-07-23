@@ -165,13 +165,25 @@ WsStreaming::~WsStreaming()
 {
     LOG_I("Closing streaming connection and stopping Boost.Asio I/O context thread");
 
-    // Tear the connection down gracefully. The ws-streaming peer is not thread-safe and must be
-    // touched only from the I/O context's thread, so close() is dispatched onto that thread rather
-    // than called directly. Closing cancels the outstanding read/write operations, which lets
-    // ioContext.run() drain its remaining work and return on its own; the thread then joins.
+    // Tear the connection down on the I/O context's thread. The ws-streaming peer is not thread-safe,
+    // and the connections below and the 'signals' map are only ever touched from that thread, so all
+    // of this must run there rather than directly from the destructor.
 
+    // Note we deliberately do NOT call ioContext.stop(): stopping abandons in-flight operations
+    // instead of completing them, which corrupts the ssl::stream as it is destroyed
     boost::asio::post(ioContext, [this]
     {
+        onAvailableConnection.disconnect();
+        onUnavailableConnection.disconnect();
+
+        for (auto& [id, entry] : signals)
+        {
+            entry->onSubscribed.disconnect();
+            entry->onMetadataChanged.disconnect();
+            entry->onDataReceived.disconnect();
+            entry->onUnsubscribed.disconnect();
+        }
+
         if (wsConnection)
             wsConnection->close();
     });
@@ -304,9 +316,9 @@ void WsStreaming::onConnected(
     LOG_I("Connected to remote peer");
     wsConnection = connection;
 
-    wsConnection->on_available.connect(
+    onAvailableConnection = wsConnection->on_available.connect(
         std::bind(&WsStreaming::onRemoteSignalAvailable, this, _1));
-    wsConnection->on_unavailable.connect(
+    onUnavailableConnection = wsConnection->on_unavailable.connect(
         std::bind(&WsStreaming::onRemoteSignalUnavailable, this, _1));
 }
 

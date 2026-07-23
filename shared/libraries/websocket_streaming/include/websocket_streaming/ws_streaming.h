@@ -173,6 +173,9 @@ class WsStreaming : public Streaming
         wss::client wsClient;
         wss::connection_ptr wsConnection;
 
+        boost::signals2::scoped_connection onAvailableConnection;
+        boost::signals2::scoped_connection onUnavailableConnection;
+
         std::map<std::string, std::shared_ptr<WsStreamingRemoteSignalEntry>> signals;
 
         std::promise<boost::system::error_code> promise;

@@ -168,6 +168,9 @@ void WsStreamingDevice::onSignalAvailable(
 void WsStreamingDevice::onSignalUnavailable(wss::remote_signal_ptr signal)
 {
     auto lock = getRecursiveConfigLock2();
+    if (this->objPtr.template asPtr<IRemovable>(true).isRemoved() || !streaming.assigned())
+        return;
+
     auto it = streamingSignals.find(signal->id());
     if (it == streamingSignals.end())
         return;
