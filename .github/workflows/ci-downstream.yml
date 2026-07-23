@@ -12,13 +12,45 @@ on:
 jobs:
   call-opendaq-reusable:
     name: LT Streaming Modern
-    uses: openDAQ/openDAQ-CI/.github/workflows/reusable.yml@v1
+    uses: openDAQ/openDAQ-CI/.github/workflows/reusable.yml@v2
     with:
       opendaq-ref: ${{ github.event.inputs.opendaq-ref || '' }}
+      include-jobs: >
+        [
+          "windows-2022-x86-msvs-v143-release",
+          "windows-2022-x86_64-msvs-v143-debug",
+          "ubuntu-20.04-x86-ninja-gcc-7-release",
+          "ubuntu-20.04-x86_64-ninja-clang-9-release",
+          "ubuntu-24.04-x86_64-ninja-gcc-14-debug",
+          "ubuntu-24.04-x86_64-ninja-gcc-14-release",
+          "ubuntu-24.04-x86_64-ninja-clang-18-release",
+          "macos-15-x86_64-ninja-appleclang-release",
+          "macos-26-x86_64-ninja-appleclang-debug",
+          "macos-26-armv8-ninja-appleclang-release"
+        ]
+      packages: >
+        [
+          {
+            "match-jobs": ["ubuntu-*-x86_64-*"],
+            "apt-install": ["libssl-dev"]
+          },
+          {
+            "match-jobs": ["ubuntu-*-x86-*"],
+            "apt-install": ["libssl-dev:i386"]
+          },
+          {
+            "match-jobs": ["windows-*-x86-*"],
+            "choco-install": ["openssl --x86"]
+          }
+        ]
       cmake-presets: >
         [
           {
             "configure-preset": "module",
             "test-preset": "module-test"
+          },
+          {
+            "match-jobs": ["windows-*-x86-*"],
+            "cache-variables": { "OPENSSL_ROOT_DIR": "C:/Program Files (x86)/OpenSSL-Win32" }
           }
         ]
