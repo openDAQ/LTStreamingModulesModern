@@ -40,7 +40,7 @@ jobs:
           },
           {
             "match-jobs": ["windows-*-x86-*"],
-            "choco-install": ["openssl --x86"]
+            "run": "vcpkg install openssl:x86-windows"
           }
         ]
       cmake-presets: >
@@ -51,6 +51,15 @@ jobs:
           },
           {
             "match-jobs": ["windows-*-x86-*"],
-            "cache-variables": { "OPENSSL_ROOT_DIR": "C:/Program Files (x86)/OpenSSL-Win32" }
+            "cache-variables": { "OPENSSL_ROOT_DIR": "C:/vcpkg/installed/x86-windows" }
+          },
+          {
+            "match-jobs": ["ubuntu-*-x86-*"],
+            "cache-variables": {
+              "OPENDAQ_FORCE_COMPILE_32BIT": true,
+              "OPENDAQ_GENERATE_PYTHON_BINDINGS": false,
+              "OPENDAQ_GENERATE_CSHARP_BINDINGS": false,
+              "CMAKE_CXX_FLAGS_INIT": "-Wno-error=shift-count-overflow"
+            }
           }
         ]
