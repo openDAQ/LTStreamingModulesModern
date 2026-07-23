@@ -281,12 +281,12 @@ StringPtr WebsocketStreamingClientModule::formConnectionString(const StringPtr& 
 
         if (outParams->port == 0 && config.assigned())
         {
-            if (portFromConfig = (isSecure && config.hasProperty(PROPERTY_WSS_STREAMING_PORT_CLIENT)))
+            if ((portFromConfig = (isSecure && config.hasProperty(PROPERTY_WSS_STREAMING_PORT_CLIENT))))
             {
                 outParams->port = config.getPropertyValue(PROPERTY_WSS_STREAMING_PORT_CLIENT);
                 portFromConfigIsDefault = outParams->port == DEFAULT_WSS_STREAMING_PORT;
             }
-            else if (portFromConfig = (!isSecure && config.hasProperty(PROPERTY_WS_STREAMING_PORT_CLIENT)))
+            else if ((portFromConfig = (!isSecure && config.hasProperty(PROPERTY_WS_STREAMING_PORT_CLIENT))))
             {
                 outParams->port = config.getPropertyValue(PROPERTY_WS_STREAMING_PORT_CLIENT);
                 portFromConfigIsDefault = outParams->port == DEFAULT_WS_STREAMING_PORT;
