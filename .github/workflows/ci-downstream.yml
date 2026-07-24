@@ -40,7 +40,7 @@ jobs:
           },
           {
             "match-jobs": ["windows-*-x86-*"],
-            "run": "vcpkg install openssl:x86-windows"
+            "run": "vcpkg install openssl:x86-windows; Add-Content -Path $env:GITHUB_PATH -Value C:\\vcpkg\\installed\\x86-windows\\bin -Encoding utf8"
           }
         ]
       cmake-presets: >
