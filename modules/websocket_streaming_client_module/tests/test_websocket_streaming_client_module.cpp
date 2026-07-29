@@ -167,15 +167,13 @@ TEST_F(WebsocketStreamingClientModuleTest, GetAvailableComponentTypes)
 
     DictPtr<IString, IDeviceType> deviceTypes;
     ASSERT_NO_THROW(deviceTypes = module.getAvailableDeviceTypes());
-    ASSERT_EQ(deviceTypes.getCount(), 4u);
+    ASSERT_EQ(deviceTypes.getCount(), 3u);
     ASSERT_TRUE(deviceTypes.hasKey("OpenDAQLTStreaming"));
     ASSERT_EQ(deviceTypes.get("OpenDAQLTStreaming").getId(), "OpenDAQLTStreaming");
     ASSERT_TRUE(deviceTypes.hasKey("OpenDAQLTStreamingSecure"));
     ASSERT_EQ(deviceTypes.get("OpenDAQLTStreamingSecure").getId(), "OpenDAQLTStreamingSecure");
     ASSERT_TRUE(deviceTypes.hasKey("OpenDAQLTStreamingOld"));
     ASSERT_EQ(deviceTypes.get("OpenDAQLTStreamingOld").getId(), "OpenDAQLTStreamingOld");
-    ASSERT_TRUE(deviceTypes.hasKey("OpenDAQLTStreamingOldSecure"));
-    ASSERT_EQ(deviceTypes.get("OpenDAQLTStreamingOldSecure").getId(), "OpenDAQLTStreamingOldSecure");
 
     DictPtr<IString, IServerType> serverTypes;
     ASSERT_NO_THROW(serverTypes = module.getAvailableServerTypes());
@@ -264,7 +262,6 @@ TEST_F(WebsocketStreamingClientModuleTest, FormConnectionStringTakesPortFromConf
 TEST_F(WebsocketStreamingClientModuleTest, FormConnectionStringNormalizesOldStylePrefixes)
 {
     ASSERT_EQ(formConnectionString("daq.ws://host:1234/", nullptr), "daq.lt://host:1234/");
-    ASSERT_EQ(formConnectionString("daq.wss://host:1234/", nullptr), "daq.lts://host:1234/");
 }
 
 TEST_F(WebsocketStreamingClientModuleTest, FormConnectionStringParsesIpv6)
@@ -326,7 +323,6 @@ TEST_F(WebsocketStreamingClientModuleTest, AcceptsAllPrefixes)
     ASSERT_TRUE(acceptsConnectionParameters(module, "daq.lt://h", nullptr));
     ASSERT_TRUE(acceptsConnectionParameters(module, "daq.ws://h", nullptr));
     ASSERT_TRUE(acceptsConnectionParameters(module, "daq.lts://h", nullptr));
-    ASSERT_TRUE(acceptsConnectionParameters(module, "daq.wss://h", nullptr));
 }
 
 TEST_F(WebsocketStreamingClientModuleTest, RejectsForeignPrefixes)

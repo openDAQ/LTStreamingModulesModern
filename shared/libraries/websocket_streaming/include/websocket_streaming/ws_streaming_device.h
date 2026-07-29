@@ -60,14 +60,6 @@ class WsStreamingDevice : public Device
         static DeviceTypePtr createNewType();
 
         /*!
-         * @brief Creates an openDAQ device type for the old-style `daq.wss://` connection string
-         * with secure TLS channel.
-         *
-         * @return An openDAQ device type for the old-style `daq.wss://` connection string.
-         */
-        static DeviceTypePtr createOldSecureType();
-
-        /*!
          * @brief Creates an openDAQ device type for the new-style `daq.lts://` connection string
          * with secure TLS channel.
          *

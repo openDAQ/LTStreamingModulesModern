@@ -73,12 +73,10 @@ DictPtr<IString, IDeviceType> WebsocketStreamingClientModule::onGetAvailableDevi
     const auto websocketDeviceType = WsStreamingDevice::createNewType();
     const auto oldWebsocketDeviceType = WsStreamingDevice::createOldType();
     const auto secureWebsocketDeviceType = WsStreamingDevice::createNewSecureType();
-    const auto oldSecureWebsocketDeviceType = WsStreamingDevice::createOldSecureType();
 
     result.set(websocketDeviceType.getId(), websocketDeviceType);
     result.set(oldWebsocketDeviceType.getId(), oldWebsocketDeviceType);
     result.set(secureWebsocketDeviceType.getId(), secureWebsocketDeviceType);
-    result.set(oldSecureWebsocketDeviceType.getId(), oldSecureWebsocketDeviceType);
 
     return result;
 }
@@ -313,7 +311,6 @@ StringPtr WebsocketStreamingClientModule::formNewStyleConnectionString(const Str
 {
     auto wsConnectionString = connectionString.toStdString();
     boost::replace_all(wsConnectionString, "daq.ws://", "daq.lt://");
-    boost::replace_all(wsConnectionString, "daq.wss://", "daq.lts://");
     return wsConnectionString;
 }
 

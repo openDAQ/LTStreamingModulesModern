@@ -62,17 +62,6 @@ DeviceTypePtr WsStreamingDevice::createNewSecureType()
         .build();
 }
 
-DeviceTypePtr WsStreamingDevice::createOldSecureType()
-{
-    return DeviceTypeBuilder()
-    .setId("OpenDAQLTStreamingOldSecure")
-        .setName("Secure streaming LT enabled pseudo-device")
-        .setDescription("Exposes signals from devices streamed using the WebSocket Streaming Protocol and TLS encryption")
-        .setDefaultConfig(createDefaultSecureConfig())
-        .setConnectionStringPrefix("daq.wss")
-        .build();
-}
-
 WsStreamingDevice::WsStreamingDevice(
         const ContextPtr& context,
         const ComponentPtr& parent,
