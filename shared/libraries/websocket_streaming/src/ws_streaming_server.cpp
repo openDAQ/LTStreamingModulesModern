@@ -56,6 +56,17 @@ PropertyObjectPtr WsStreamingServer::createDefaultConfig(const ContextPtr& conte
 
     defaultConfig.addProperty(StringProperty("Path", "/"));
 
+    // Upper bound, in bytes, on the size of a single frame a connection will receive/transmit;
+    // oversized frames cause the connection to be closed with an error rather than being
+    // buffered further. See wss::detail::peer::peer() for details.
+    const auto rxBufferSizeProp =
+        IntPropertyBuilder("RxBufferSize", 1 * 1024 * 1024).setMinValue(1).build();
+    defaultConfig.addProperty(rxBufferSizeProp);
+
+    const auto txBufferSizeProp =
+        IntPropertyBuilder("TxBufferSize", 4 * 1024 * 1024).setMinValue(1).build();
+    defaultConfig.addProperty(txBufferSizeProp);
+
     populateDefaultConfigFromProvider(context, defaultConfig);
     return defaultConfig;
 }
@@ -102,7 +113,10 @@ WsStreamingServer::WsStreamingServer(
     : Server{ID, config, rootDevice, context}
     , _rootDevice{rootDevice}
     , _ioc{1}
-    , _server{_ioc.get_executor()}
+    , _server{
+        _ioc.get_executor(),
+        static_cast<std::size_t>(static_cast<Int>(config.getPropertyValue("RxBufferSize"))),
+        static_cast<std::size_t>(static_cast<Int>(config.getPropertyValue("TxBufferSize")))}
 {
     _port = config.getPropertyValue("WebsocketStreamingPort");
 

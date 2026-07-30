@@ -51,10 +51,14 @@ StreamingTypePtr WsStreaming::createType()
 
 WsStreaming::WsStreaming(
         const StringPtr& connectionString,
-        const ContextPtr& context)
+        const ContextPtr& context,
+        const PropertyObjectPtr& config)
     : Streaming(connectionString, context, true)
     , ioContext{1}
-    , wsClient(ioContext.get_executor())
+    , wsClient(
+        ioContext.get_executor(),
+        static_cast<std::size_t>(static_cast<Int>(populateDefaultConfig(config).getPropertyValue("RxBufferSize"))),
+        static_cast<std::size_t>(static_cast<Int>(populateDefaultConfig(config).getPropertyValue("TxBufferSize"))))
 {
     // The ws-streaming library wants a URL like ws://1.2.3.4:7418/foo.
     // So we simply need to replace the daq.lt:// prefix with ws://.
@@ -97,7 +101,32 @@ PropertyObjectPtr WsStreaming::createDefaultConfig()
 {
     auto obj = PropertyObject();
     obj.addProperty(IntProperty("Port", 7414));
+
+    // Upper bound, in bytes, on the size of a single frame this connection will receive/transmit;
+    // oversized frames cause the connection to be closed with an error rather than being
+    // buffered further. See wss::detail::peer::peer() for details. As a client, this connection
+    // mostly receives sample data and only sends small subscribe/RPC requests, so - unlike the
+    // server - it is the receive buffer that needs the larger default here.
+    obj.addProperty(IntPropertyBuilder("RxBufferSize", 4 * 1024 * 1024).setMinValue(1).build());
+    obj.addProperty(IntPropertyBuilder("TxBufferSize", 1 * 1024 * 1024).setMinValue(1).build());
+
     return obj;
+}
+
+PropertyObjectPtr WsStreaming::populateDefaultConfig(const PropertyObjectPtr& config)
+{
+    const auto defConfig = createDefaultConfig();
+    if (!config.assigned())
+        return defConfig;
+
+    for (const auto& prop : defConfig.getAllProperties())
+    {
+        const auto name = prop.getName();
+        if (config.hasProperty(name))
+            defConfig.setPropertyValue(name, config.getPropertyValue(name));
+    }
+
+    return defConfig;
 }
 
 void WsStreaming::onSetActive(bool active)

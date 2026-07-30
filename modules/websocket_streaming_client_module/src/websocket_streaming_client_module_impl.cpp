@@ -177,7 +177,7 @@ StreamingPtr WebsocketStreamingClientModule::onCreateStreaming(const StringPtr& 
         DAQ_THROW_EXCEPTION(InvalidParameterException);
 
     const StringPtr str = formConnectionString(connectionString, config);
-    return createWithImplementation<IStreaming, WsStreaming>(str, context);
+    return createWithImplementation<IStreaming, WsStreaming>(str, context, config);
 }
 
 Bool WebsocketStreamingClientModule::onCompleteServerCapability(const ServerCapabilityPtr& source, const ServerCapabilityConfigPtr& target)

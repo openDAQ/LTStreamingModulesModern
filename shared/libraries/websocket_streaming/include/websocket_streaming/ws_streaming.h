@@ -79,6 +79,17 @@ class WsStreaming : public Streaming
          */
         static StreamingTypePtr createType();
 
+        /*!
+         * @brief Merges the specified config with the default config, so that any properties
+         *     missing from @p config are filled in with their default values.
+         *
+         * @param config The config to merge with the default config. May be null, in which case
+         *     the default config is returned unmodified.
+         * @return The merged config.
+         */
+        static PropertyObjectPtr populateDefaultConfig(
+            const PropertyObjectPtr& config);
+
     public:
 
         /*!
@@ -88,10 +99,13 @@ class WsStreaming : public Streaming
          *     prefix. The remote peer address and TCP port number are parsed from the connection
          *     string.
          * @param context The openDAQ context object.
+         * @param config The streaming configuration, as returned by createDefaultConfig(). May be
+         *     null, in which case defaults are used for all properties.
          */
         explicit WsStreaming(
             const StringPtr& connectionString,
-            const ContextPtr& context);
+            const ContextPtr& context,
+            const PropertyObjectPtr& config = nullptr);
 
         /*!
          * @brief Destroys a streaming object and stops the Boost.Asio I/O context's thread.
