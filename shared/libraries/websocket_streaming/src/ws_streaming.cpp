@@ -44,22 +44,22 @@ BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 StreamingTypePtr WsStreaming::createType()
 {
     return StreamingTypeBuilder()
-        .setId("OpenDAQLTStreaming")
+        .setId(CONST_LT_STREAMING_ID)
         .setName("openDAQ WebSocket Streaming")
         .setDescription("Streaming from devices using the WebSocket Streaming Protocol")
         .setDefaultConfig(createDefaultConfig())
-        .setConnectionStringPrefix("daq.lt")
+        .setConnectionStringPrefix(CONST_LT_STREAMING_PREFIX)
         .build();
 }
 
 StreamingTypePtr WsStreaming::createSecureType()
 {
     return StreamingTypeBuilder()
-    .setId("OpenDAQLTStreamingSecure")
+    .setId(CONST_LTS_STREAMING_ID)
         .setName("openDAQ WebSocket Streaming")
         .setDescription("Streaming from devices using the WebSocket Streaming Protocol and TLS encryption")
         .setDefaultConfig(createDefaultSecureConfig())
-        .setConnectionStringPrefix("daq.lts")
+        .setConnectionStringPrefix(CONST_LTS_STREAMING_PREFIX)
         .build();
 }
 

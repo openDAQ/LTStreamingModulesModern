@@ -50,7 +50,8 @@ private:
         std::string path;
     };
 
-    DAQ_WS_STREAM_CL_MODULE_API static StringPtr createUrlConnectionString(const StringPtr& host,
+    DAQ_WS_STREAM_CL_MODULE_API static StringPtr createUrlConnectionString(bool secureType,
+                                                                           const StringPtr& host,
                                                                            const IntegerPtr& port,
                                                                            const StringPtr& path);
     DAQ_WS_STREAM_CL_MODULE_API static StringPtr formConnectionString(const StringPtr& connectionString,

@@ -5,6 +5,24 @@
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 
+static constexpr const char* CONST_LT_SERVICE_NAME = "_streaming-lt._tcp.local.";
+static constexpr const char* CONST_WS_SERVICE_NAME = "_streaming-ws._tcp.local.";
+static constexpr const char* CONST_LTS_SERVICE_NAME = "_streaming-lts._tcp.local.";
+
+static constexpr const char* CONST_LT_STREAMING_PREFIX = "daq.lt";
+static constexpr const char* CONST_WS_STREAMING_PREFIX = "daq.ws";
+static constexpr const char* CONST_LTS_STREAMING_PREFIX = "daq.lts";
+
+static constexpr const char* CONST_SERVICE_CAPABILITY = "LT";
+
+static constexpr const char* CONST_LT_PROTOCOL_GROUP_ID = "OpenDAQLTStreaming";
+static constexpr const char* CONST_LT_STREAMING_ID = "OpenDAQLTStreaming";
+static constexpr const char* CONST_LTS_STREAMING_ID = "OpenDAQLTStreamingSecure";
+static constexpr const char* CONST_LT_STREAMING_SERVER_ID = "OpenDAQLTStreaming";
+static constexpr const char* CONST_LTS_STREAMING_SERVER_ID = "OpenDAQLTStreamingSecure";
+static constexpr const int64_t CONST_LT_STREAMING_SECURITY_LVL = 0;
+static constexpr const int64_t CONST_LTS_STREAMING_SECURITY_LVL = 10;
+
 static constexpr const char* PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER = "EnableStreamingPort";
 static constexpr const char* PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER = "EnableControlPort";
 static constexpr const char* PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER = "EnableTlsStreamingPort";
@@ -15,6 +33,7 @@ static constexpr const char* PROPERTY_WSS_STREAMING_PORT_SERVER = "TlsWebsocketS
 static constexpr const char* PROPERTY_WSS_CERT_FILE_PATH_SERVER = "CertificateFilePath";
 static constexpr const char* PROPERTY_WSS_KEY_FILE_PATH_SERVER = "KeyFilePath";
 static constexpr const char* PROPERTY_WSS_CA_CERT_FILE_PATH_SERVER = "CaCertificateFilePath";
+static constexpr const char* PROPERTY_PATH_SERVER = "Path";
 
 static constexpr const char* PROPERTY_ENABLE_MTLS_CLIENT = "EnableMutualTls";
 static constexpr const char* PROPERTY_WS_STREAMING_PORT_CLIENT = "Port";            // to not break existing configs this property is named "Port" instead of "WebsocketStreamingPort"

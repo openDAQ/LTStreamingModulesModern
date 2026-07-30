@@ -31,7 +31,7 @@ protected:
 
     static StringPtr createUrlConnectionString(const StringPtr& host, const IntegerPtr& port, const StringPtr& path)
     {
-        return WebsocketStreamingClientModule::createUrlConnectionString(host, port, path);
+        return WebsocketStreamingClientModule::createUrlConnectionString(false, host, port, path);
     }
 
     static bool isSecureConnection(const std::string& connectionString)

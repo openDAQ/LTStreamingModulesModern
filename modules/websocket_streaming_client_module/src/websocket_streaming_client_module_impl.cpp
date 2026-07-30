@@ -52,9 +52,9 @@ WebsocketStreamingClientModule::WebsocketStreamingClientModule(ContextPtr contex
         std::move(context),
         "OpenDAQWebsocketClientModule")
     , deviceIndex(0)
-    , discoveryClient({"LT"})
+    , discoveryClient({CONST_SERVICE_CAPABILITY})
 {
-    discoveryClient.initMdnsClient(List<IString>("_streaming-lt._tcp.local.", "_streaming-ws._tcp.local."));
+    discoveryClient.initMdnsClient(List<IString>(CONST_LT_SERVICE_NAME, CONST_LTS_SERVICE_NAME, CONST_WS_SERVICE_NAME));
     loggerComponent = this->context.getLogger().getOrAddComponent("StreamingLTClient");
 }
 
@@ -127,7 +127,7 @@ DevicePtr WebsocketStreamingClientModule::onCreateDevice(const StringPtr& connec
     auto device = createWithImplementation<IDevice, WsStreamingDevice>(context, parent, localId, formedConnectionStr, deviceType, deviceConfig);
 
     // Set the connection info for the device
-    StreamingTypePtr wsStreamingType =
+    const auto wsStreamingType =
         (isSecureConnection(formedConnectionStr)) ? WsStreaming::createSecureType() : WsStreaming::createType();
 
     ServerCapabilityConfigPtr connectionInfo = device.getInfo().getConfigurationConnectionInfo();
@@ -157,7 +157,7 @@ bool WebsocketStreamingClientModule::acceptsConnectionParameters(const StringPtr
 
 bool WebsocketStreamingClientModule::acceptsStreamingConnectionParameters(const StringPtr& connectionString, const PropertyObjectPtr& config)
 {
-    if (connectionString.assigned() && connectionString != "")
+    if (connectionString.assigned() && connectionString.getLength() > 0)
     {
         return acceptsConnectionParameters(connectionString, config);
     }
@@ -184,7 +184,8 @@ StreamingPtr WebsocketStreamingClientModule::onCreateStreaming(const StringPtr& 
 
 Bool WebsocketStreamingClientModule::onCompleteServerCapability(const ServerCapabilityPtr& source, const ServerCapabilityConfigPtr& target)
 {
-    if (target.getProtocolId() != "OpenDAQLTStreaming")
+    const auto protoId = target.getProtocolId();
+    if (protoId != CONST_LT_STREAMING_ID && protoId != CONST_LTS_STREAMING_ID)
         return false;
 
     if (source.getConnectionType() != "TCP/IP")
@@ -203,12 +204,15 @@ Bool WebsocketStreamingClientModule::onCompleteServerCapability(const ServerCapa
         return false;
     }
 
+    const bool isSecure = (protoId == CONST_LTS_STREAMING_ID);
     auto port = target.getPort();
     if (port == -1)
     {
-        port = DEFAULT_WS_STREAMING_PORT;
+        port = (isSecure) ? DEFAULT_WSS_STREAMING_PORT : DEFAULT_WS_STREAMING_PORT;
         target.setPort(port);
-        LOG_W("LT server capability is missing port. Defaulting to {}", std::to_string(DEFAULT_WS_STREAMING_PORT))
+        LOG_W("LT {}server capability is missing port. Defaulting to {}",
+              isSecure ? "secure " : "",
+              std::to_string(static_cast<uint16_t>(port)))
     }
 
     const auto path = target.hasProperty("Path") ? target.getPropertyValue("Path") : "";
@@ -223,7 +227,7 @@ Bool WebsocketStreamingClientModule::onCompleteServerCapability(const ServerCapa
         if (source.getPrefix() == target.getPrefix())
             connectionString = addrInfo.getConnectionString();
         else
-            connectionString = createUrlConnectionString(address, port, path);
+            connectionString = createUrlConnectionString(isSecure, address, port, path);
         const auto targetAddrInfo = AddressInfoBuilder()
                                         .setAddress(address)
                                         .setReachabilityStatus(addrInfo.getReachabilityStatus())
@@ -239,12 +243,13 @@ Bool WebsocketStreamingClientModule::onCompleteServerCapability(const ServerCapa
     return true;
 }
 
-StringPtr WebsocketStreamingClientModule::createUrlConnectionString(const StringPtr& host,
+StringPtr WebsocketStreamingClientModule::createUrlConnectionString(bool secureType,
+                                                                    const StringPtr& host,
                                                                     const IntegerPtr& port,
                                                                     const StringPtr& path)
 {
-    return String(WsStreaming::createType().getConnectionStringPrefix().toStdString()
-        + fmt::format("://{}:{}{}", host, port, path));
+    const auto prefix = secureType ? CONST_LTS_STREAMING_PREFIX : CONST_LT_STREAMING_PREFIX;
+    return String(fmt::format("{}://{}:{}{}", prefix, host, port, path));
 }
 
 StringPtr WebsocketStreamingClientModule::formConnectionString(const StringPtr& connectionString,
@@ -310,54 +315,61 @@ StringPtr WebsocketStreamingClientModule::formConnectionString(const StringPtr& 
 StringPtr WebsocketStreamingClientModule::formNewStyleConnectionString(const StringPtr& connectionString)
 {
     auto wsConnectionString = connectionString.toStdString();
-    boost::replace_all(wsConnectionString, "daq.ws://", "daq.lt://");
+    boost::replace_all(wsConnectionString, std::string(CONST_WS_STREAMING_PREFIX) + "://", std::string(CONST_LT_STREAMING_PREFIX) + "://");
     return wsConnectionString;
 }
 
 DeviceInfoPtr WebsocketStreamingClientModule::populateDiscoveredDevice(const MdnsDiscoveredDevice& discoveredDevice)
 {
-    auto cap = ServerCapability(
-        WsStreamingDevice::createNewType().getId(),
-        "OpenDAQLTStreaming",
-        ProtocolType::Streaming);
-
-    for (const auto& ipAddress : discoveredDevice.ipv4Addresses)
+    StreamingTypePtr streamingType;
+    DeviceTypePtr deviceType;
+    bool isSecure = false;
+    if (discoveredDevice.serviceName == CONST_LT_SERVICE_NAME || discoveredDevice.serviceName == CONST_WS_SERVICE_NAME)
     {
-        auto connectionStringIpv4 = WebsocketStreamingClientModule::createUrlConnectionString(
-            ipAddress,
-            discoveredDevice.servicePort,
-            discoveredDevice.getPropertyOrDefault("path", "/")
-            );
-        cap.addConnectionString(connectionStringIpv4);
-        cap.addAddress(ipAddress);
-        const auto addressInfo = AddressInfoBuilder().setAddress(ipAddress)
-                                     .setReachabilityStatus(AddressReachabilityStatus::Unknown)
-                                     .setType("IPv4")
-                                     .setConnectionString(connectionStringIpv4)
-                                     .build();
-        cap.addAddressInfo(addressInfo);
+        isSecure = false;
+        streamingType = WsStreaming::createType();
+        deviceType = WsStreamingDevice::createNewType();
+    }
+    else if (discoveredDevice.serviceName == CONST_LTS_SERVICE_NAME)
+    {
+        isSecure = true;
+        streamingType = WsStreaming::createSecureType();
+        deviceType = WsStreamingDevice::createNewSecureType();
+    }
+    else
+    {
+        DAQ_THROW_EXCEPTION(InvalidParameterException,
+                            "Discovered device service name \"{}\" is not supported by the WebsocketStreamingClientModule.",
+                            discoveredDevice.serviceName);
     }
 
-    for (const auto& ipAddress : discoveredDevice.ipv6Addresses)
-    {
-        auto connectionStringIpv6 = WebsocketStreamingClientModule::createUrlConnectionString(
-            ipAddress,
-            discoveredDevice.servicePort,
-            discoveredDevice.getPropertyOrDefault("path", "/")
-            );
-        cap.addConnectionString(connectionStringIpv6);
-        cap.addAddress(ipAddress);
+    auto cap = ServerCapability(streamingType.getId(), streamingType.getId(), ProtocolType::Streaming);
 
-        const auto addressInfo = AddressInfoBuilder().setAddress(ipAddress)
-                                     .setReachabilityStatus(AddressReachabilityStatus::Unknown)
-                                     .setType("IPv6")
-                                     .setConnectionString(connectionStringIpv6)
-                                     .build();
-        cap.addAddressInfo(addressInfo);
-    }
+    auto addAddressInfo = [&cap, &discoveredDevice, isSecure](const std::unordered_set<std::string>& ipAddresses, const std::string& type)
+    {
+        for (const auto& ipAddr : ipAddresses)
+        {
+            auto connectionStr = createUrlConnectionString(
+                isSecure, ipAddr, discoveredDevice.servicePort, discoveredDevice.getPropertyOrDefault("path", "/"));
+            cap.addConnectionString(connectionStr);
+            cap.addAddress(ipAddr);
+            const auto addressInfo = AddressInfoBuilder()
+                                         .setAddress(ipAddr)
+                                         .setReachabilityStatus(AddressReachabilityStatus::Unknown)
+                                         .setType(type)
+                                         .setConnectionString(connectionStr)
+                                         .build();
+            cap.addAddressInfo(addressInfo);
+        }
+    };
+
+    addAddressInfo(discoveredDevice.ipv4Addresses, "IPv4");
+    addAddressInfo(discoveredDevice.ipv6Addresses, "IPv6");
 
     cap.setConnectionType("TCP/IP");
-    cap.setPrefix("daq.lt");
+    cap.setProtocolGroupId(CONST_LT_PROTOCOL_GROUP_ID);
+    cap.setProtocolSecurityLevel(isSecure ? CONST_LTS_STREAMING_SECURITY_LVL : CONST_LT_STREAMING_SECURITY_LVL);
+    cap.setPrefix(streamingType.getConnectionStringPrefix());
     cap.setProtocolVersion(discoveredDevice.getPropertyOrDefault("protocolVersion", ""));
     if (discoveredDevice.servicePort > 0)
         cap.setPort(discoveredDevice.servicePort);
@@ -366,12 +378,12 @@ DeviceInfoPtr WebsocketStreamingClientModule::populateDiscoveredDevice(const Mdn
         DiscoveryClient::populateDiscoveredInfoProperties,
         discoveredDevice,
         cap,
-        WsStreamingDevice::createNewType());
+        deviceType);
 }
 
 bool WebsocketStreamingClientModule::isSecureConnection(const std::string& connectionString)
 {
-    const auto securePrefix = WsStreaming::createSecureType().getConnectionStringPrefix().toStdString() + "://";
+    const auto securePrefix = std::string(CONST_LTS_STREAMING_PREFIX) + "://";
     return connectionString.find(securePrefix) != std::string::npos;
 }
 

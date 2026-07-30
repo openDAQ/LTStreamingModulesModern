@@ -31,6 +31,7 @@
 #include <ws-streaming/ws-streaming.hpp>
 
 #include <websocket_streaming/common.h>
+#include <websocket_streaming/constants.h>
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 
@@ -38,7 +39,7 @@ class WsStreamingServer : public Server
 {
     public:
 
-        static constexpr const char *ID = "OpenDAQLTStreaming";
+        static constexpr const char *ID = CONST_LT_STREAMING_SERVER_ID;
 
         static PropertyObjectPtr createDefaultConfig(
             const ContextPtr& context);
@@ -64,7 +65,7 @@ class WsStreamingServer : public Server
 
     protected:
 
-        PropertyObjectPtr getDiscoveryConfig() override;
+        ListPtr<IPropertyObject> getDiscoveryConfigs() override;
 
         void onStopServer() override;
 
@@ -74,7 +75,11 @@ class WsStreamingServer : public Server
             const ContextPtr& context,
             const PropertyObjectPtr& config);
 
+        static PropertyObjectPtr createDefaultConfig();
+        static void addDefaultConfig(PropertyObjectPtr& config);
+
         void addCapability();
+        void removeCapability();
 
         void createListener(const SignalPtr& signal);
 
@@ -131,7 +136,11 @@ class WsStreamingServer : public Server
         wss::server _server;
         std::thread _thread;
         std::map<std::string, StreamableSignal> _localSignals;
-        Int _port;
+        Int _ws_port{0};
+        Int _wss_port{0};
+        std::string _path;
+        bool _ws_channel_enabled{false};
+        bool _wss_channel_enabled{false};
 
         boost::signals2::scoped_connection _onClientConnected;
         boost::signals2::scoped_connection _onClientDisconnected;
