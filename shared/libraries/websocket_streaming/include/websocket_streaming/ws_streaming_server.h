@@ -141,6 +141,7 @@ class WsStreamingServer : public Server
         std::string _path;
         bool _ws_channel_enabled{false};
         bool _wss_channel_enabled{false};
+        bool _capability_added{false};
 
         boost::signals2::scoped_connection _onClientConnected;
         boost::signals2::scoped_connection _onClientDisconnected;

@@ -254,11 +254,20 @@ WsStreamingServer::WsStreamingServer(
 
     rescan();
 
-    _thread = std::thread{[this]() { _ioc.run(); }};
-
-    context.getOnCoreEvent() += event(&WsStreamingServer::onCoreEvent);
-
+    // No destructor runs for a constructor that throws, so everything below must unwind on its own.
     addCapability();
+
+    try
+    {
+        context.getOnCoreEvent() += event(&WsStreamingServer::onCoreEvent);
+        _thread = std::thread{[this]() { _ioc.run(); }};
+    }
+    catch (...)
+    {
+        context.getOnCoreEvent() -= event(&WsStreamingServer::onCoreEvent);
+        removeCapability();
+        throw;
+    }
 }
 
 WsStreamingServer::~WsStreamingServer()
@@ -382,10 +391,16 @@ void WsStreamingServer::addCapability()
         info.asPtr<IDeviceInfoInternal>(true).addServerCapability(cap);
     }
 
+    _capability_added = _ws_channel_enabled || _wss_channel_enabled;
 }
 
 void WsStreamingServer::removeCapability()
 {
+    if (!_capability_added)
+        return;
+
+    _capability_added = false;
+
     if (!_rootDevice.assigned() || _rootDevice.isRemoved())
         return;
 
