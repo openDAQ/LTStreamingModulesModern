@@ -3,9 +3,14 @@
 #include <websocket_streaming_client_module/version.h>
 #include <websocket_streaming_client_module/websocket_streaming_client_module_impl.h>
 #include <websocket_streaming/constants.h>
+#include <websocket_streaming/ws_streaming.h>
 
 #include <opendaq/module_ptr.h>
 #include <coretypes/common.h>
+
+#include <algorithm>
+#include <string>
+#include <vector>
 
 #include <opendaq/context_factory.h>
 #include <opendaq/device_info_factory.h>
@@ -34,6 +39,11 @@ protected:
         return WebsocketStreamingClientModule::createUrlConnectionString(false, host, port, path);
     }
 
+    static StringPtr createUrlConnectionString(bool secureType, const StringPtr& host, const IntegerPtr& port, const StringPtr& path)
+    {
+        return WebsocketStreamingClientModule::createUrlConnectionString(secureType, host, port, path);
+    }
+
     static bool isSecureConnection(const std::string& connectionString)
     {
         return WebsocketStreamingClientModule::isSecureConnection(connectionString);
@@ -47,6 +57,56 @@ protected:
     static bool acceptsStreamingConnectionParameters(const ModulePtr& module, const StringPtr& connectionString, const PropertyObjectPtr& config)
     {
         return reinterpret_cast<WebsocketStreamingClientModule*>(module.getObject())->acceptsStreamingConnectionParameters(connectionString, config);
+    }
+
+    static DeviceInfoPtr populateDiscoveredDevice(const discovery::MdnsDiscoveredDevice& discoveredDevice)
+    {
+        return WebsocketStreamingClientModule::populateDiscoveredDevice(discoveredDevice);
+    }
+
+    static Bool completeServerCapability(const ModulePtr& module,
+                                         const ServerCapabilityPtr& source,
+                                         const ServerCapabilityConfigPtr& target)
+    {
+        return module.completeServerCapability(source, target);
+    }
+
+    static discovery::MdnsDiscoveredDevice makeDiscoveredDevice(const std::string& serviceName,
+                                                                uint32_t servicePort = 7414,
+                                                                const std::unordered_set<std::string>& ipv4 = {"192.168.1.10"},
+                                                                const std::unordered_set<std::string>& ipv6 = {},
+                                                                const std::unordered_map<std::string, std::string>& properties = {})
+    {
+        discovery::MdnsDiscoveredDevice device{};
+        device.serviceName = serviceName;
+        device.servicePort = servicePort;
+        device.ipv4Addresses = ipv4;
+        device.ipv6Addresses = ipv6;
+        device.properties = properties;
+        return device;
+    }
+
+    static ServerCapabilityPtr firstCapability(const DeviceInfoPtr& info)
+    {
+        const auto caps = info.getServerCapabilities();
+        EXPECT_EQ(caps.getCount(), 1u);
+        return caps[0];
+    }
+
+    static ServerCapabilityConfigPtr makeSourceCapability(const std::string& address = "192.168.1.10",
+                                                          const std::string& prefix = "daq.opcua")
+    {
+        auto source = ServerCapability("OpenDAQOPCUA", "OpenDAQOPCUA", ProtocolType::Configuration);
+        source.setConnectionType("TCP/IP");
+        source.setPrefix(String(prefix));
+        source.addAddress(String(address));
+        source.addAddressInfo(AddressInfoBuilder()
+                                  .setAddress(String(address))
+                                  .setReachabilityStatus(AddressReachabilityStatus::Reachable)
+                                  .setType("IPv4")
+                                  .setConnectionString(String(prefix + "://" + address + ":4840"))
+                                  .build());
+        return source;
     }
 };
 
@@ -417,4 +477,171 @@ TEST_F(WebsocketStreamingClientModuleTest, DefaultSecureStreamingConfig)
     ASSERT_TRUE(config.getProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).getVisible());
     ASSERT_FALSE(config.getProperty(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).getVisible());
     ASSERT_FALSE(config.getProperty(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).getVisible());
+}
+TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLtService)
+{
+    const auto info = populateDiscoveredDevice(makeDiscoveredDevice(CONST_LT_SERVICE_NAME, 7425));
+    const auto cap = firstCapability(info);
+
+    ASSERT_EQ(cap.getProtocolId(), CONST_LT_STREAMING_ID);
+    ASSERT_EQ(cap.getProtocolName(), CONST_LT_STREAMING_ID);
+    ASSERT_EQ(cap.getPrefix(), CONST_LT_STREAMING_PREFIX);
+    ASSERT_EQ(cap.getProtocolGroupId(), CONST_LT_PROTOCOL_GROUP_ID);
+    ASSERT_EQ(cap.getProtocolType(), ProtocolType::Streaming);
+    ASSERT_EQ(cap.getConnectionType(), "TCP/IP");
+    ASSERT_EQ(cap.getPort(), 7425);
+    ASSERT_EQ(info.getDeviceType().getId(), CONST_LT_STREAMING_ID);
+    ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LT_STREAMING_SECURITY_LVL);
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLtsService)
+{
+    const auto info = populateDiscoveredDevice(makeDiscoveredDevice(CONST_LTS_SERVICE_NAME, 7435));
+    const auto cap = firstCapability(info);
+
+    ASSERT_EQ(cap.getProtocolId(), CONST_LTS_STREAMING_ID);
+    ASSERT_EQ(cap.getProtocolName(), CONST_LTS_STREAMING_ID);
+    ASSERT_EQ(cap.getPrefix(), CONST_LTS_STREAMING_PREFIX);
+    ASSERT_EQ(cap.getProtocolGroupId(), CONST_LT_PROTOCOL_GROUP_ID);
+    ASSERT_EQ(cap.getProtocolType(), ProtocolType::Streaming);
+    ASSERT_EQ(cap.getPort(), 7435);
+    ASSERT_EQ(info.getDeviceType().getId(), CONST_LTS_STREAMING_ID);
+    ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LTS_STREAMING_SECURITY_LVL);
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLegacyWsService)
+{
+    const auto info = populateDiscoveredDevice(makeDiscoveredDevice(CONST_WS_SERVICE_NAME, 7425));
+    const auto cap = firstCapability(info);
+
+    ASSERT_EQ(cap.getProtocolId(), CONST_LT_STREAMING_ID);
+    ASSERT_EQ(cap.getProtocolName(), CONST_LT_STREAMING_ID);
+    ASSERT_EQ(cap.getPrefix(), CONST_LT_STREAMING_PREFIX);
+    ASSERT_EQ(cap.getProtocolGroupId(), CONST_LT_PROTOCOL_GROUP_ID);
+    ASSERT_EQ(cap.getProtocolType(), ProtocolType::Streaming);
+    ASSERT_EQ(cap.getConnectionType(), "TCP/IP");
+    ASSERT_EQ(cap.getPort(), 7425);
+    ASSERT_EQ(info.getDeviceType().getId(), CONST_LT_STREAMING_ID);
+    ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LT_STREAMING_SECURITY_LVL);
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceSecurityLevel)
+{
+    const auto insecure = populateDiscoveredDevice(makeDiscoveredDevice(CONST_LT_SERVICE_NAME));
+    const auto secure = populateDiscoveredDevice(makeDiscoveredDevice(CONST_LTS_SERVICE_NAME, 7415));
+
+    ASSERT_EQ(firstCapability(insecure).getProtocolSecurityLevel(), CONST_LT_STREAMING_SECURITY_LVL);
+    ASSERT_EQ(firstCapability(secure).getProtocolSecurityLevel(), CONST_LTS_STREAMING_SECURITY_LVL);
+    ASSERT_GT(firstCapability(secure).getProtocolSecurityLevel(), firstCapability(insecure).getProtocolSecurityLevel());
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, CompleteServerCapabilityDefaultPortPerScheme)
+{
+    auto module = CreateModule();
+
+    auto target = ServerCapability(CONST_LT_STREAMING_ID, CONST_LT_STREAMING_ID, ProtocolType::Streaming);
+    target.setPrefix(CONST_LT_STREAMING_PREFIX);
+    ASSERT_TRUE(completeServerCapability(module, makeSourceCapability(), target));
+    ASSERT_EQ(target.getPort(), DEFAULT_WS_STREAMING_PORT);
+
+    auto secureTarget = ServerCapability(CONST_LTS_STREAMING_ID, CONST_LTS_STREAMING_ID, ProtocolType::Streaming);
+    secureTarget.setPrefix(CONST_LTS_STREAMING_PREFIX);
+    ASSERT_TRUE(completeServerCapability(module, makeSourceCapability(), secureTarget));
+    ASSERT_EQ(secureTarget.getPort(), DEFAULT_WSS_STREAMING_PORT);
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceUnknownServiceThrows)
+{
+    ASSERT_THROW(populateDiscoveredDevice(makeDiscoveredDevice("_streaming-xx._tcp.local.")), InvalidParameterException);
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceConnectionStrings)
+{
+    const auto info = populateDiscoveredDevice(makeDiscoveredDevice(CONST_LT_SERVICE_NAME,
+                                                                    7425,
+                                                                    {"192.168.1.10", "192.168.1.11"},
+                                                                    {"[fe80::1]"},
+                                                                    {{"path", "/foo"}}));
+    const auto cap = firstCapability(info);
+
+    const auto connectionStrings = cap.getConnectionStrings();
+    ASSERT_EQ(connectionStrings.getCount(), 3u);
+    ASSERT_EQ(cap.getAddresses().getCount(), 3u);
+
+    std::vector<std::string> actual;
+    for (const auto& connectionString : connectionStrings)
+        actual.push_back(connectionString.toStdString());
+    std::sort(actual.begin(), actual.end());
+
+    const std::vector<std::string> expected{"daq.lt://192.168.1.10:7425/foo",
+                                            "daq.lt://192.168.1.11:7425/foo",
+                                            "daq.lt://[fe80::1]:7425/foo"};
+    ASSERT_EQ(actual, expected);
+
+    for (const auto& addressInfo : cap.getAddressInfo())
+    {
+        ASSERT_EQ(addressInfo.getReachabilityStatus(), AddressReachabilityStatus::Unknown);
+        const std::string address = addressInfo.getAddress().toStdString();
+        ASSERT_EQ(addressInfo.getType(), address.front() == '[' ? "IPv6" : "IPv4");
+    }
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceDefaultsPath)
+{
+    const auto cap = firstCapability(populateDiscoveredDevice(makeDiscoveredDevice(CONST_LT_SERVICE_NAME, 7425)));
+    ASSERT_EQ(cap.getConnectionStrings()[0], "daq.lt://192.168.1.10:7425/");
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, CreateUrlConnectionStringSecure)
+{
+    ASSERT_EQ(createUrlConnectionString(true, "192.168.1.10", 7435, "/"), "daq.lts://192.168.1.10:7435/");
+    ASSERT_EQ(createUrlConnectionString(false, "192.168.1.10", 7425, "/"), "daq.lt://192.168.1.10:7425/");
+    ASSERT_EQ(createUrlConnectionString(true, "192.168.1.10", 7435, ""), "daq.lts://192.168.1.10:7435");
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, CreateUrlConnectionStringIpv6)
+{
+    ASSERT_EQ(createUrlConnectionString(false, "[::1]", 7425, "/"), "daq.lt://[::1]:7425/");
+    ASSERT_EQ(createUrlConnectionString(true, "[::1]", 7435, "/"), "daq.lts://[::1]:7435/");
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, CompleteServerCapabilityAcceptsBothIds)
+{
+    auto module = CreateModule();
+
+    for (const auto& protocolId : {CONST_LT_STREAMING_ID, CONST_LTS_STREAMING_ID})
+    {
+        auto target = ServerCapability(protocolId, protocolId, ProtocolType::Streaming);
+        ASSERT_TRUE(completeServerCapability(module, makeSourceCapability(), target)) << protocolId;
+    }
+
+    auto foreign = ServerCapability("OpenDAQOPCUA", "OpenDAQOPCUA", ProtocolType::Configuration);
+    ASSERT_FALSE(completeServerCapability(module, makeSourceCapability(), foreign));
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, CompleteServerCapabilityBuildsString)
+{
+    auto module = CreateModule();
+
+    auto target = ServerCapability(CONST_LTS_STREAMING_ID, CONST_LTS_STREAMING_ID, ProtocolType::Streaming);
+    target.setPrefix(CONST_LTS_STREAMING_PREFIX);
+    target.setPort(7435);
+
+    ASSERT_TRUE(completeServerCapability(module, makeSourceCapability("192.168.1.10", "daq.opcua"), target));
+
+    ASSERT_EQ(target.getConnectionString(), "daq.lts://192.168.1.10:7435");
+    ASSERT_EQ(target.getAddresses().getCount(), 1u);
+    ASSERT_EQ(target.getAddresses()[0], "192.168.1.10");
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, ConstantsMatchPublicIds)
+{
+    ASSERT_EQ(WsStreaming::createType().getId(), CONST_LT_STREAMING_ID);
+    ASSERT_EQ(WsStreaming::createType().getConnectionStringPrefix(), CONST_LT_STREAMING_PREFIX);
+    ASSERT_EQ(WsStreaming::createSecureType().getId(), CONST_LTS_STREAMING_ID);
+    ASSERT_EQ(WsStreaming::createSecureType().getConnectionStringPrefix(), CONST_LTS_STREAMING_PREFIX);
+
+    const auto deviceTypes = CreateModule().getAvailableDeviceTypes();
+    ASSERT_EQ(deviceTypes.get(CONST_LT_STREAMING_ID).getConnectionStringPrefix(), CONST_LT_STREAMING_PREFIX);
+    ASSERT_EQ(deviceTypes.get(CONST_LTS_STREAMING_ID).getConnectionStringPrefix(), CONST_LTS_STREAMING_PREFIX);
 }

@@ -37,6 +37,30 @@ constexpr const char* CLIENT_KEY = "secrets/client.key";
 constexpr const char* SERVER_TYPE_ID = "OpenDAQLTStreaming";
 constexpr const char* SECURE_DEVICE_TYPE_ID = "OpenDAQLTStreamingSecure";
 constexpr const char* SIGNAL_NAME = "ByteStep";
+
+class CapturingDiscoveryServer : public ImplementationOf<IDiscoveryServer>
+{
+public:
+    ErrCode INTERFACE_FUNC registerService(IString* id, IPropertyObject* config, IDeviceInfo* /*deviceInfo*/) override
+    {
+        registered.emplace_back(StringPtr(id), PropertyObjectPtr(config));
+        return OPENDAQ_SUCCESS;
+    }
+
+    ErrCode INTERFACE_FUNC unregisterService(IString* id) override
+    {
+        unregistered.push_back(StringPtr(id));
+        return OPENDAQ_SUCCESS;
+    }
+
+    ErrCode INTERFACE_FUNC setRootDevice(IDevice* /*device*/) override
+    {
+        return OPENDAQ_SUCCESS;
+    }
+
+    std::vector<std::pair<StringPtr, PropertyObjectPtr>> registered;
+    std::vector<StringPtr> unregistered;
+};
 }
 
 class LtStreamingTlsTest : public testing::Test
@@ -53,6 +77,34 @@ protected:
         auto instance = InstanceCustom(context, "server");
         instance.addDevice("daqmock://phys_device");
         return instance;
+    }
+
+    // Instance whose discovery layer is the capturing fake instead of the mDNS server
+    InstancePtr createServerInstanceWithDiscovery(CapturingDiscoveryServer** outDiscoveryServer)
+    {
+        const auto logger = Logger();
+        const auto moduleManager = ModuleManager(".");
+
+        auto discoveryServer = createWithImplementation<IDiscoveryServer, CapturingDiscoveryServer>();
+        *outDiscoveryServer = static_cast<CapturingDiscoveryServer*>(discoveryServer.getObject());
+
+        const auto context = Context(Scheduler(logger),
+                                     logger,
+                                     TypeManager(),
+                                     moduleManager,
+                                     AuthenticationProvider(),
+                                     Dict<IString, IBaseObject>(),
+                                     Dict<IString, IDiscoveryServer>({{"capturing", discoveryServer}}));
+
+        return InstanceCustom(context, "server");
+    }
+
+    static PropertyObjectPtr findDiscoveryConfig(const CapturingDiscoveryServer& discoveryServer, const std::string& serviceName)
+    {
+        for (const auto& [_, config] : discoveryServer.registered)
+            if (config.getPropertyValue("ServiceName") == serviceName)
+                return config;
+        return nullptr;
     }
 
     PropertyObjectPtr baseServerConfig(const InstancePtr& instance)
@@ -322,4 +374,151 @@ TEST_F(LtStreamingTlsTest, ClientRejectsMismatchedKey)
     config.setPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_CLIENT, SERVER_KEY);
 
     ASSERT_THROW(client.addDevice("daq.lts://127.0.0.1:7622/", config), InvalidParameterException);
+}
+
+TEST_F(LtStreamingTlsTest, DiscoveryRegistersBothChannels)
+{
+    auto instance = InstanceBuilder().setModulePath(".").addDiscoveryServer("mdns").build();
+    auto server = instance.addServer(SERVER_TYPE_ID, bothChannelsServerConfig(instance, 7630, 7631));
+
+    ASSERT_NO_THROW(server.enableDiscovery());
+    ASSERT_NO_THROW(server.disableDiscovery());
+    ASSERT_NO_THROW(server.enableDiscovery());
+}
+
+TEST_F(LtStreamingTlsTest, AddCapabilityWssOnly)
+{
+    auto instance = createServerInstanceWithDevice();
+    instance.addServer(SERVER_TYPE_ID, secureServerConfig(instance, 7632, /*mtls*/ false));
+
+    const auto info = instance.getRootDevice().getInfo();
+    ASSERT_TRUE(info.hasServerCapability(CONST_LTS_STREAMING_ID));
+    ASSERT_FALSE(info.hasServerCapability(CONST_LT_STREAMING_ID));
+
+    const auto cap = info.getServerCapability(CONST_LTS_STREAMING_ID);
+    ASSERT_EQ(cap.getPrefix(), CONST_LTS_STREAMING_PREFIX);
+    ASSERT_EQ(cap.getPort(), 7632);
+    ASSERT_EQ(cap.getProtocolGroupId(), CONST_LT_PROTOCOL_GROUP_ID);
+    ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LTS_STREAMING_SECURITY_LVL);
+}
+
+TEST_F(LtStreamingTlsTest, AddCapabilityBothChannels)
+{
+    auto instance = createServerInstanceWithDevice();
+    instance.addServer(SERVER_TYPE_ID, bothChannelsServerConfig(instance, 7633, 7634));
+
+    const auto info = instance.getRootDevice().getInfo();
+    ASSERT_TRUE(info.hasServerCapability(CONST_LT_STREAMING_ID));
+    ASSERT_TRUE(info.hasServerCapability(CONST_LTS_STREAMING_ID));
+
+    const auto plain = info.getServerCapability(CONST_LT_STREAMING_ID);
+    const auto secure = info.getServerCapability(CONST_LTS_STREAMING_ID);
+
+    ASSERT_EQ(plain.getPort(), 7633);
+    ASSERT_EQ(secure.getPort(), 7634);
+    ASSERT_EQ(plain.getProtocolGroupId(), secure.getProtocolGroupId());
+    ASSERT_GT(secure.getProtocolSecurityLevel(), plain.getProtocolSecurityLevel());
+}
+
+TEST_F(LtStreamingTlsTest, FailedSecondServerLeavesFirstIntact)
+{
+    auto instance = createServerInstanceWithDevice();
+    instance.addServer(SERVER_TYPE_ID, insecureServerConfig(instance, 7635));
+
+    auto badConfig = secureServerConfig(instance, 7636, /*mtls*/ false);
+    badConfig.setPropertyValue(PROPERTY_WSS_CERT_FILE_PATH_SERVER, "secrets/does-not-exist.crt");
+    ASSERT_THROW(instance.addServer(SERVER_TYPE_ID, badConfig), InvalidParameterException);
+
+    // rejected because the device already carries an LT capability, not because of the config
+    ASSERT_THROW(instance.addServer(SERVER_TYPE_ID, insecureServerConfig(instance, 7637)), InvalidStateException);
+
+    ASSERT_TRUE(instance.getRootDevice().getInfo().hasServerCapability(CONST_LT_STREAMING_ID));
+
+    auto client = createClientInstance();
+    auto device = client.addDevice("daq.lt://127.0.0.1:7635/");
+    runStreamingExchange(instance, device);
+}
+
+TEST_F(LtStreamingTlsTest, DiscoveryConfigsWsOnly)
+{
+    CapturingDiscoveryServer* discoveryServer = nullptr;
+    auto instance = createServerInstanceWithDiscovery(&discoveryServer);
+    auto server = instance.addServer(SERVER_TYPE_ID, insecureServerConfig(instance, 7640));
+    server.enableDiscovery();
+
+    ASSERT_EQ(discoveryServer->registered.size(), 1u);
+    ASSERT_EQ(discoveryServer->registered[0].first, SERVER_TYPE_ID);
+
+    const auto config = discoveryServer->registered[0].second;
+    ASSERT_EQ(config.getPropertyValue("ServiceName"), CONST_LT_SERVICE_NAME);
+    ASSERT_EQ(config.getPropertyValue("ServiceCap"), CONST_SERVICE_CAPABILITY);
+    ASSERT_EQ(config.getPropertyValue("Port"), 7640);
+    ASSERT_EQ(config.getPropertyValue("Path"), "/");
+}
+
+TEST_F(LtStreamingTlsTest, DiscoveryConfigsWssOnly)
+{
+    CapturingDiscoveryServer* discoveryServer = nullptr;
+    auto instance = createServerInstanceWithDiscovery(&discoveryServer);
+    auto server = instance.addServer(SERVER_TYPE_ID, secureServerConfig(instance, 7641, /*mtls*/ false));
+    server.enableDiscovery();
+
+    ASSERT_EQ(discoveryServer->registered.size(), 1u);
+
+    const auto config = discoveryServer->registered[0].second;
+    ASSERT_EQ(config.getPropertyValue("ServiceName"), CONST_LTS_SERVICE_NAME);
+    ASSERT_EQ(config.getPropertyValue("ServiceCap"), CONST_SERVICE_CAPABILITY);
+    ASSERT_EQ(config.getPropertyValue("Port"), 7641);
+}
+
+TEST_F(LtStreamingTlsTest, DiscoveryConfigsUseConfiguredPathAndPorts)
+{
+    CapturingDiscoveryServer* discoveryServer = nullptr;
+    auto instance = createServerInstanceWithDiscovery(&discoveryServer);
+
+    auto config = bothChannelsServerConfig(instance, 7642, 7643);
+    config.setPropertyValue(PROPERTY_PATH_SERVER, "/lt");
+
+    auto server = instance.addServer(SERVER_TYPE_ID, config);
+    server.enableDiscovery();
+
+    ASSERT_EQ(discoveryServer->registered.size(), 2u);
+
+    const auto plain = findDiscoveryConfig(*discoveryServer, CONST_LT_SERVICE_NAME);
+    const auto secure = findDiscoveryConfig(*discoveryServer, CONST_LTS_SERVICE_NAME);
+    ASSERT_TRUE(plain.assigned());
+    ASSERT_TRUE(secure.assigned());
+
+    ASSERT_EQ(plain.getPropertyValue("Port"), 7642);
+    ASSERT_EQ(secure.getPropertyValue("Port"), 7643);
+    ASSERT_EQ(plain.getPropertyValue("Path"), "/lt");
+    ASSERT_EQ(secure.getPropertyValue("Path"), "/lt");
+
+    server.disableDiscovery();
+    ASSERT_EQ(discoveryServer->unregistered.size(), 1u);
+    ASSERT_EQ(discoveryServer->unregistered[0], SERVER_TYPE_ID);
+}
+
+TEST_F(LtStreamingTlsTest, DiscoveryConfigIgnoresDisabledChannelPort)
+{
+    CapturingDiscoveryServer* discoveryServer = nullptr;
+    auto instance = createServerInstanceWithDiscovery(&discoveryServer);
+
+    auto config = insecureServerConfig(instance, 7644);
+    config.setPropertyValue(PROPERTY_WSS_STREAMING_PORT_SERVER, 7645);
+
+    auto server = instance.addServer(SERVER_TYPE_ID, config);
+    server.enableDiscovery();
+
+    ASSERT_EQ(discoveryServer->registered.size(), 1u);
+    ASSERT_EQ(discoveryServer->registered[0].second.getPropertyValue("Port"), 7644);
+}
+
+TEST_F(LtStreamingTlsTest, StopAfterRootDeviceRemovedDoesNotThrow)
+{
+    auto instance = createServerInstanceWithDevice();
+    auto server = instance.addServer(SERVER_TYPE_ID, insecureServerConfig(instance, 7646));
+
+    instance.getRootDevice().remove();
+    ASSERT_NO_THROW(server.stop());
 }

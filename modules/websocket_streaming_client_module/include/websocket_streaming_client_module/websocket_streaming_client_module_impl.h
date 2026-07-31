@@ -58,7 +58,7 @@ private:
                                                                       const PropertyObjectPtr& config,
                                                                       ConnectionParameters* outParams = nullptr);
     DAQ_WS_STREAM_CL_MODULE_API static StringPtr formNewStyleConnectionString(const StringPtr& connectionString);
-    static DeviceInfoPtr populateDiscoveredDevice(const discovery::MdnsDiscoveredDevice& discoveredDevice);
+    DAQ_WS_STREAM_CL_MODULE_API static DeviceInfoPtr populateDiscoveredDevice(const discovery::MdnsDiscoveredDevice& discoveredDevice);
     DAQ_WS_STREAM_CL_MODULE_API static bool isSecureConnection(const std::string& connectionString);
 
     std::mutex sync;
