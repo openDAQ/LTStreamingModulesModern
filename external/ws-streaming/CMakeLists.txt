@@ -5,6 +5,6 @@ opendaq_dependency(
     REQUIRED_VERSION    3.0.8
     GIT_REPOSITORY      https://github.com/openDAQ/ws-streaming
     GIT_REF             tls
-    GIT_SHALLOW         OFF
+    GIT_SHALLOW         ON
     EXPECT_TARGET       ws-streaming::ws-streaming
 )
