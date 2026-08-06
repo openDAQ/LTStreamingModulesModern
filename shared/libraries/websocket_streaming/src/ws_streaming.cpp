@@ -84,6 +84,8 @@ WsStreaming::WsStreaming(
     boost::replace_all(wsConnectionString, "daq.wss://", "wss://");
     bool isSecureChannel = wsConnectionString.find("wss://") != std::string::npos;
 
+    const auto effectiveConfig = populateConfigFromDefault(config, isSecureChannel);
+
     if (isSecureChannel)
     {
         LOG_I("Secure channel requested, enabling TLS");
@@ -91,15 +93,10 @@ WsStreaming::WsStreaming(
         std::string certFilePath;
         std::string keyFilePath;
         std::string caCertFilePath;
-        if (config.hasProperty(PROPERTY_ENABLE_MTLS_CLIENT) && config.getPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT).asPtr<IBoolean>() == True)
+        if (effectiveConfig.getPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT).asPtr<IBoolean>() == True)
         {
-            if (!config.hasProperty(PROPERTY_WSS_CERT_FILE_PATH_CLIENT) || !config.hasProperty(PROPERTY_WSS_KEY_FILE_PATH_CLIENT))
-                DAQ_THROW_EXCEPTION(InvalidParameterException,
-                    "Mutual TLS is enabled but the configuration has no {} or {} property",
-                    PROPERTY_WSS_CERT_FILE_PATH_CLIENT, PROPERTY_WSS_KEY_FILE_PATH_CLIENT);
-
-            certFilePath = config.getPropertyValue(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
-            keyFilePath = config.getPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+            certFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+            keyFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
 
             if (certFilePath.empty() || keyFilePath.empty())
                 DAQ_THROW_EXCEPTION(InvalidParameterException, "TLS certificate or key file path is not configured");
@@ -110,12 +107,8 @@ WsStreaming::WsStreaming(
         {
             LOG_I("mTLS disabled");
         }
-        if (!config.hasProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT))
-            DAQ_THROW_EXCEPTION(InvalidParameterException,
-                "A secure connection requires the {} property in the configuration",
-                PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT);
 
-        caCertFilePath = config.getPropertyValue(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+        caCertFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
         if (caCertFilePath.empty())
             DAQ_THROW_EXCEPTION(InvalidParameterException, "TLS CA certificate file path is not configured");
 
@@ -189,6 +182,25 @@ WsStreaming::~WsStreaming()
     });
 
     thread.join();
+}
+
+PropertyObjectPtr WsStreaming::populateConfigFromDefault(const PropertyObjectPtr& config, bool secure)
+{
+    const auto defaultConfig = secure ? createDefaultSecureConfig() : createDefaultConfig();
+
+    if (!config.assigned())
+        return defaultConfig;
+
+    for (const auto& prop : defaultConfig.getAllProperties())
+    {
+        if (config.hasProperty(prop.getName()))
+            continue;
+
+        config.addProperty(prop.asPtr<IPropertyInternal>(true).clone());
+        config.setPropertyValue(prop.getName(), prop.getValue());
+    }
+
+    return config;
 }
 
 PropertyObjectPtr WsStreaming::createDefaultConfig()

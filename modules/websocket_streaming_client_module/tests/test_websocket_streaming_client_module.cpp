@@ -436,6 +436,37 @@ TEST_F(WebsocketStreamingClientModuleTest, SecureStreamingRejectsEmptyCaWithMtls
                      "TLS CA certificate file path is not configured");
 }
 
+TEST_F(WebsocketStreamingClientModuleTest, SecureStreamingCompletesNullConfig)
+{
+    // A missing configuration is completed with the secure defaults, so the constructor reaches
+    // the certificate check instead of dereferencing a null configuration object.
+    ASSERT_THROW_MSG((createWithImplementation<IStreaming, WsStreaming>(
+                          String("daq.lts://127.0.0.1:1/"), NullContext(), nullptr)),
+                     InvalidParameterException,
+                     "TLS certificate or key file path is not configured");
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, SecureStreamingCompletesPartialConfig)
+{
+    // A configuration carrying only the port is completed with the missing TLS properties.
+    auto module = CreateModule();
+    auto config = PropertyObject();
+    config.addProperty(IntProperty(PROPERTY_WSS_STREAMING_PORT_CLIENT, DEFAULT_WSS_STREAMING_PORT));
+
+    ASSERT_THROW_MSG(module.createStreaming("daq.lts://127.0.0.1:1/", config),
+                     InvalidParameterException,
+                     "TLS certificate or key file path is not configured");
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, InsecureStreamingCompletesNullConfig)
+{
+    // The plain channel completes a missing configuration too, and so fails on the unreachable
+    // peer rather than on the configuration.
+    ASSERT_THROW((createWithImplementation<IStreaming, WsStreaming>(
+                      String("daq.lt://127.0.0.1:1/"), NullContext(), nullptr)),
+                 NotFoundException);
+}
+
 TEST_F(WebsocketStreamingClientModuleTest, DefaultInsecureStreamingConfig)
 {
     auto module = CreateModule();

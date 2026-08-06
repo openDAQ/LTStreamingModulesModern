@@ -146,6 +146,8 @@ class WsStreaming : public Streaming
 
     private:
 
+        static PropertyObjectPtr populateConfigFromDefault(const PropertyObjectPtr& config, bool secure);
+
         void onConnected(
             const boost::system::error_code& ec,
             wss::connection_ptr connection);
