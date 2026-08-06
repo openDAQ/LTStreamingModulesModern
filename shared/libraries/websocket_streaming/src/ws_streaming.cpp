@@ -90,38 +90,55 @@ WsStreaming::WsStreaming(
     {
         LOG_I("Secure channel requested, enabling TLS");
 
-        std::string certFilePath;
-        std::string keyFilePath;
-        std::string caCertFilePath;
-        if (effectiveConfig.getPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT).asPtr<IBoolean>() == True)
+        if (effectiveConfig.getPropertyValue(PROPERTY_VERIFY_SERVER_CERT_CLIENT).asPtr<IBoolean>() == False)
         {
-            certFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
-            keyFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+            LOG_W("Server certificate verification is disabled: the connection is encrypted, but the server "
+                  "is not authenticated. Your connection is vulnerable to man-in-the-middle attacks.");
 
-            if (certFilePath.empty() || keyFilePath.empty())
-                DAQ_THROW_EXCEPTION(InvalidParameterException, "TLS certificate or key file path is not configured");
-
-            LOG_I("mTLS enabled, using cert file: \'{}\' and key file: \'{}\'", certFilePath, keyFilePath);
+            try
+            {
+                wsClient.enable_tls_without_verification();
+            }
+            catch (const std::exception& e)
+            {
+                DAQ_THROW_EXCEPTION(InvalidParameterException, "Cannot enable TLS: {}", e.what());
+            }
         }
         else
         {
-            LOG_I("mTLS disabled");
-        }
+            std::string certFilePath;
+            std::string keyFilePath;
+            std::string caCertFilePath;
+            if (effectiveConfig.getPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT).asPtr<IBoolean>() == True)
+            {
+                certFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+                keyFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
 
-        caCertFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
-        if (caCertFilePath.empty())
-            DAQ_THROW_EXCEPTION(InvalidParameterException, "TLS CA certificate file path is not configured");
+                if (certFilePath.empty() || keyFilePath.empty())
+                    DAQ_THROW_EXCEPTION(InvalidParameterException, "TLS certificate or key file path is not configured");
 
-        LOG_I("Using CA certificate file: \'{}\'", caCertFilePath);
-        LOG_I("Trying to load TLS secrets...");
+                LOG_I("mTLS enabled, using cert file: \'{}\' and key file: \'{}\'", certFilePath, keyFilePath);
+            }
+            else
+            {
+                LOG_I("mTLS disabled");
+            }
 
-        try
-        {
-            wsClient.enable_tls(caCertFilePath, certFilePath, keyFilePath);
-        }
-        catch (const std::exception& e)
-        {
-            DAQ_THROW_EXCEPTION(InvalidParameterException, "Cannot load the TLS secrets: {}", e.what());
+            caCertFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+            if (caCertFilePath.empty())
+                DAQ_THROW_EXCEPTION(InvalidParameterException, "TLS CA certificate file path is not configured");
+
+            LOG_I("Using CA certificate file: \'{}\'", caCertFilePath);
+            LOG_I("Trying to load TLS secrets...");
+
+            try
+            {
+                wsClient.enable_tls(caCertFilePath, certFilePath, keyFilePath);
+            }
+            catch (const std::exception& e)
+            {
+                DAQ_THROW_EXCEPTION(InvalidParameterException, "Cannot load the TLS secrets: {}", e.what());
+            }
         }
     }
 
@@ -225,24 +242,35 @@ PropertyObjectPtr WsStreaming::createDefaultSecureConfig()
     }
 
     {
-        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_MTLS_CLIENT, DEFAULT_ENABLE_MTLS);
+        auto builder = BoolPropertyBuilder(PROPERTY_VERIFY_SERVER_CERT_CLIENT, DEFAULT_VERIFY_SERVER_CERT);
+        defaultConfig.addProperty(builder.build());
+    }
+
+    const auto verifyingServer = std::string("$") + PROPERTY_VERIFY_SERVER_CERT_CLIENT + " == 1";
+    const auto verifyingServerWithMtls =
+        "(" + verifyingServer + ") && ($" + PROPERTY_ENABLE_MTLS_CLIENT + " == 1)";
+
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_MTLS_CLIENT, DEFAULT_ENABLE_MTLS)
+                           .setVisible(EvalValue(verifyingServer));
         defaultConfig.addProperty(builder.build());
     }
 
     {
         auto builder = StringPropertyBuilder(PROPERTY_WSS_CERT_FILE_PATH_CLIENT, DEFAULT_WSS_CERT_FILE_PATH)
-                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_MTLS_CLIENT + " == 1"));
+                           .setVisible(EvalValue(verifyingServerWithMtls));
         defaultConfig.addProperty(builder.build());
     }
 
     {
         auto builder = StringPropertyBuilder(PROPERTY_WSS_KEY_FILE_PATH_CLIENT, DEFAULT_WSS_KEY_FILE_PATH)
-                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_MTLS_CLIENT + " == 1"));
+                           .setVisible(EvalValue(verifyingServerWithMtls));
         defaultConfig.addProperty(builder.build());
     }
 
     {
-        auto builder = StringPropertyBuilder(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT, DEFAULT_WSS_CA_CERT_FILE_PATH);
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT, DEFAULT_WSS_CA_CERT_FILE_PATH)
+                           .setVisible(EvalValue(verifyingServer));
         defaultConfig.addProperty(builder.build());
     }
 

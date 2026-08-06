@@ -486,21 +486,25 @@ TEST_F(WebsocketStreamingClientModuleTest, DefaultSecureStreamingConfig)
     auto config = module.getAvailableStreamingTypes().get("OpenDAQLTStreamingSecure").createDefaultConfig();
     ASSERT_TRUE(config.assigned());
 
-    ASSERT_EQ(config.getAllProperties().getCount(), 5u);
+    ASSERT_EQ(config.getAllProperties().getCount(), 6u);
 
     ASSERT_TRUE(config.hasProperty(PROPERTY_WSS_STREAMING_PORT_CLIENT));
+    ASSERT_TRUE(config.hasProperty(PROPERTY_VERIFY_SERVER_CERT_CLIENT));
     ASSERT_TRUE(config.hasProperty(PROPERTY_ENABLE_MTLS_CLIENT));
     ASSERT_TRUE(config.hasProperty(PROPERTY_WSS_CERT_FILE_PATH_CLIENT));
     ASSERT_TRUE(config.hasProperty(PROPERTY_WSS_KEY_FILE_PATH_CLIENT));
     ASSERT_TRUE(config.hasProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT));
 
     ASSERT_EQ(config.getProperty(PROPERTY_WSS_STREAMING_PORT_CLIENT).getValueType(), CoreType::ctInt);
+    ASSERT_EQ(config.getProperty(PROPERTY_VERIFY_SERVER_CERT_CLIENT).getValueType(), CoreType::ctBool);
     ASSERT_EQ(config.getProperty(PROPERTY_ENABLE_MTLS_CLIENT).getValueType(), CoreType::ctBool);
 
     ASSERT_EQ(config.getPropertyValue(PROPERTY_WSS_STREAMING_PORT_CLIENT), DEFAULT_WSS_STREAMING_PORT);
+    ASSERT_EQ(config.getPropertyValue(PROPERTY_VERIFY_SERVER_CERT_CLIENT), DEFAULT_VERIFY_SERVER_CERT);
     ASSERT_EQ(config.getPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT), DEFAULT_ENABLE_MTLS);
 
     config.setPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT, True);
+    ASSERT_TRUE(config.getProperty(PROPERTY_ENABLE_MTLS_CLIENT).getVisible());
     ASSERT_TRUE(config.getProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).getVisible());
     ASSERT_TRUE(config.getProperty(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).getVisible());
     ASSERT_TRUE(config.getProperty(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).getVisible());
@@ -508,6 +512,24 @@ TEST_F(WebsocketStreamingClientModuleTest, DefaultSecureStreamingConfig)
     ASSERT_TRUE(config.getProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).getVisible());
     ASSERT_FALSE(config.getProperty(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).getVisible());
     ASSERT_FALSE(config.getProperty(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).getVisible());
+
+    // Nothing below the verification switch is meaningful once it is off
+    config.setPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT, True);
+    config.setPropertyValue(PROPERTY_VERIFY_SERVER_CERT_CLIENT, False);
+    ASSERT_TRUE(config.getProperty(PROPERTY_VERIFY_SERVER_CERT_CLIENT).getVisible());
+    ASSERT_FALSE(config.getProperty(PROPERTY_ENABLE_MTLS_CLIENT).getVisible());
+    ASSERT_FALSE(config.getProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).getVisible());
+    ASSERT_FALSE(config.getProperty(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).getVisible());
+    ASSERT_FALSE(config.getProperty(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).getVisible());
+}
+
+TEST_F(WebsocketStreamingClientModuleTest, SecureStreamingWithoutVerificationNeedsNoCa)
+{
+    auto module = CreateModule();
+    auto config = module.getAvailableStreamingTypes().get("OpenDAQLTStreamingSecure").createDefaultConfig();
+    config.setPropertyValue(PROPERTY_VERIFY_SERVER_CERT_CLIENT, False);
+
+    ASSERT_THROW(module.createStreaming("daq.lts://127.0.0.1:1/", config), NotFoundException);
 }
 TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLtService)
 {

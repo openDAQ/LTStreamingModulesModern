@@ -156,6 +156,13 @@ protected:
         return Instance(".");
     }
 
+    PropertyObjectPtr unverifiedDeviceConfig(const InstancePtr& instance)
+    {
+        auto cfg = instance.getAvailableDeviceTypes().get(SECURE_DEVICE_TYPE_ID).createDefaultConfig();
+        cfg.setPropertyValue(PROPERTY_VERIFY_SERVER_CERT_CLIENT, False);
+        return cfg;
+    }
+
     PropertyObjectPtr secureDeviceConfig(const InstancePtr& instance, bool mtls, const std::string& caFile)
     {
         auto cfg = instance.getAvailableDeviceTypes().get(SECURE_DEVICE_TYPE_ID).createDefaultConfig();
@@ -327,6 +334,35 @@ TEST_F(LtStreamingTlsTest, WssMissingCaRejected)
     auto client = createClientInstance();
     ASSERT_THROW(client.addDevice("daq.lts://127.0.0.1:7614/", secureDeviceConfig(client, /*mtls*/ false, "")),
                  InvalidParameterException);
+}
+
+TEST_F(LtStreamingTlsTest, WssNoVerificationAcceptsUntrustedCert)
+{
+    auto server = createServerInstanceWithDevice();
+    server.addServer(SERVER_TYPE_ID, secureServerConfig(server, 7625, /*mtls*/ false));
+
+    auto client = createClientInstance();
+    ASSERT_NO_THROW(client.addDevice("daq.lts://127.0.0.1:7625/", unverifiedDeviceConfig(client)));
+}
+
+TEST_F(LtStreamingTlsTest, WssNoVerificationStreaming)
+{
+    auto server = createServerInstanceWithDevice();
+    server.addServer(SERVER_TYPE_ID, secureServerConfig(server, 7624, /*mtls*/ false));
+
+    auto client = createClientInstance();
+    auto device = client.addDevice("daq.lts://127.0.0.1:7624/", unverifiedDeviceConfig(client));
+    runStreamingExchange(server, device);
+}
+
+TEST_F(LtStreamingTlsTest, WssNoVerificationRejectedByMtlsServer)
+{
+    auto server = createServerInstanceWithDevice();
+    server.addServer(SERVER_TYPE_ID, secureServerConfig(server, 7626, /*mtls*/ true));
+
+    auto client = createClientInstance();
+    ASSERT_THROW(client.addDevice("daq.lts://127.0.0.1:7626/", unverifiedDeviceConfig(client)),
+                 AuthenticationFailedException);
 }
 
 TEST_F(LtStreamingTlsTest, WssUnreachableServerReportedAsNotFound)
