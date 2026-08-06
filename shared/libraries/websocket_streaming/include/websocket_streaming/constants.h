@@ -15,7 +15,7 @@ static constexpr const char* CONST_LTS_STREAMING_PREFIX = "daq.lts";
 
 static constexpr const char* CONST_SERVICE_CAPABILITY = "LT";
 
-static constexpr const char* CONST_LT_PROTOCOL_GROUP_ID = "OpenDAQLTStreaming";
+static constexpr const char* CONST_LT_PROTOCOL_GROUP_ID = "LTStreaming";
 static constexpr const char* CONST_LT_STREAMING_ID = "OpenDAQLTStreaming";
 static constexpr const char* CONST_LTS_STREAMING_ID = "OpenDAQLTStreamingSecure";
 static constexpr const char* CONST_LT_STREAMING_SERVER_ID = "OpenDAQLTStreaming";
