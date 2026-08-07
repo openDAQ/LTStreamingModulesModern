@@ -21,6 +21,7 @@
 #include <string>
 
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/ssl/error.hpp>
 #include <boost/endian/conversion.hpp>
@@ -40,6 +41,22 @@
 using namespace std::placeholders;
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
+
+namespace
+{
+bool isTlsRejection(bool isSecureChannel, const boost::system::error_code& ec)
+{
+    if (!isSecureChannel)
+        return false;
+
+    return ec == boost::asio::error::connection_aborted
+        || ec == boost::asio::error::connection_reset
+        || ec == boost::asio::error::broken_pipe
+        || ec == boost::asio::error::eof
+        || ec == boost::asio::ssl::error::stream_truncated;
+}
+
+}
 
 StreamingTypePtr WsStreaming::createType()
 {
@@ -162,7 +179,7 @@ WsStreaming::WsStreaming(
 
         // A failure raised by the TLS layer means the peer was reached but not trusted.
         // That is an authentication problem.
-        if (ec.category() == boost::asio::error::get_ssl_category())
+        if (ec.category() == boost::asio::error::get_ssl_category() || isTlsRejection(isSecureChannel, ec))
             DAQ_THROW_EXCEPTION(AuthenticationFailedException,
                 "Failed to connect to {}: {}", connectionString.toStdString(), ec.message());
 
