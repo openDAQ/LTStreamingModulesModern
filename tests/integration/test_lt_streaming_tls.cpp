@@ -176,6 +176,35 @@ protected:
         return cfg;
     }
 
+    static ListPtr<IConnectedClientInfo> connectedClients(const InstancePtr& serverInstance)
+    {
+        return serverInstance.getRootDevice().getInfo().getConnectedClientsInfo();
+    }
+
+    // Clients are registered from the server I/O thread, so the list is populated asynchronously
+    static ListPtr<IConnectedClientInfo> waitForConnectedClients(const InstancePtr& serverInstance,
+                                                                 SizeT count,
+                                                                 std::chrono::seconds timeout = 10s)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        auto clients = connectedClients(serverInstance);
+        while (clients.getCount() != count && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(50ms);
+            clients = connectedClients(serverInstance);
+        }
+        return clients;
+    }
+
+    static ConnectedClientInfoPtr findConnectedClient(const ListPtr<IConnectedClientInfo>& clients,
+                                                      const std::string& protocolName)
+    {
+        for (const auto& client : clients)
+            if (client.getProtocolName() == protocolName)
+                return client;
+        return nullptr;
+    }
+
     static SignalPtr findSignal(const DevicePtr& device, const std::string& name)
     {
         for (const auto& signal : device.getSignals(search::Recursive(search::Visible())))
@@ -454,6 +483,65 @@ TEST_F(LtStreamingTlsTest, AddCapabilityBothChannels)
     ASSERT_EQ(secure.getPort(), 7634);
     ASSERT_EQ(plain.getProtocolGroupId(), secure.getProtocolGroupId());
     ASSERT_GT(secure.getProtocolSecurityLevel(), plain.getProtocolSecurityLevel());
+}
+
+TEST_F(LtStreamingTlsTest, ConnectedClientOverWsReportsPlaintextProtocol)
+{
+    auto server = createServerInstanceWithDevice();
+    server.addServer(SERVER_TYPE_ID, insecureServerConfig(server, 7650));
+
+    auto client = createClientInstance();
+    auto device = client.addDevice("daq.lt://127.0.0.1:7650/");
+
+    const auto clients = waitForConnectedClients(server, 1u);
+    ASSERT_EQ(clients.getCount(), 1u);
+    EXPECT_EQ(clients[0].getProtocolName(), CONST_LT_STREAMING_ID);
+    EXPECT_EQ(clients[0].getProtocolType(), ProtocolType::Streaming);
+    EXPECT_NE(clients[0].getAddress().toStdString().find("127.0.0.1"), std::string::npos);
+}
+
+TEST_F(LtStreamingTlsTest, ConnectedClientOverWssReportsSecureProtocol)
+{
+    auto server = createServerInstanceWithDevice();
+    server.addServer(SERVER_TYPE_ID, secureServerConfig(server, 7651, /*mtls*/ true));
+
+    auto client = createClientInstance();
+    auto device = client.addDevice("daq.lts://127.0.0.1:7651/", secureDeviceConfig(client, /*mtls*/ true, CA_CERT));
+
+    const auto clients = waitForConnectedClients(server, 1u);
+    ASSERT_EQ(clients.getCount(), 1u);
+    EXPECT_EQ(clients[0].getProtocolName(), CONST_LTS_STREAMING_ID);
+    EXPECT_EQ(clients[0].getProtocolType(), ProtocolType::Streaming);
+    EXPECT_NE(clients[0].getAddress().toStdString().find("127.0.0.1"), std::string::npos);
+}
+
+TEST_F(LtStreamingTlsTest, ConnectedClientsOnBothChannelsReportTheirOwnProtocol)
+{
+    auto server = createServerInstanceWithDevice();
+    server.addServer(SERVER_TYPE_ID, bothChannelsServerConfig(server, 7652, 7653));
+
+    auto plainClient = createClientInstance();
+    auto plainDevice = plainClient.addDevice("daq.lt://127.0.0.1:7652/");
+
+    auto secureClient = createClientInstance();
+    auto secureDevice =
+        secureClient.addDevice("daq.lts://127.0.0.1:7653/", secureDeviceConfig(secureClient, /*mtls*/ false, CA_CERT));
+
+    const auto clients = waitForConnectedClients(server, 2u);
+    ASSERT_EQ(clients.getCount(), 2u);
+
+    const auto plain = findConnectedClient(clients, CONST_LT_STREAMING_ID);
+    const auto secure = findConnectedClient(clients, CONST_LTS_STREAMING_ID);
+    ASSERT_TRUE(plain.assigned()) << "no client reported on the plaintext channel";
+    ASSERT_TRUE(secure.assigned()) << "no client reported on the secure channel";
+    EXPECT_EQ(plain.getProtocolType(), ProtocolType::Streaming);
+    EXPECT_EQ(secure.getProtocolType(), ProtocolType::Streaming);
+
+    // and each connection is unregistered on its own
+    plainClient.removeDevice(plainDevice);
+    const auto remaining = waitForConnectedClients(server, 1u);
+    ASSERT_EQ(remaining.getCount(), 1u);
+    EXPECT_EQ(remaining[0].getProtocolName(), CONST_LTS_STREAMING_ID);
 }
 
 TEST_F(LtStreamingTlsTest, FailedSecondServerLeavesFirstIntact)
