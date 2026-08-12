@@ -179,9 +179,21 @@ WsStreaming::WsStreaming(
 
         // A failure raised by the TLS layer means the peer was reached but not trusted.
         // That is an authentication problem.
-        if (ec.category() == boost::asio::error::get_ssl_category() || isTlsRejection(isSecureChannel, ec))
+        if (ec.category() == boost::asio::error::get_ssl_category())
+        {
             DAQ_THROW_EXCEPTION(AuthenticationFailedException,
-                "Failed to connect to {}: {}", connectionString.toStdString(), ec.message());
+                "TLS handshake with {} failed: {}. Check the server certificate and the configured "
+                "CA certificate, and the client certificate if mutual TLS is enabled",
+                connectionString.toStdString(), ec.message());
+        }
+
+        if (isTlsRejection(isSecureChannel, ec))
+        {
+            DAQ_THROW_EXCEPTION(AuthenticationFailedException,
+                "Failed to connect to {}: the peer closed the TLS connection during or right after "
+                "the handshake ({}). This usually means the server rejected the client certificate",
+                connectionString.toStdString(), ec.message());
+        }
 
         DAQ_THROW_EXCEPTION(NotFoundException,
             "Failed to connect to {}: {}", connectionString.toStdString(), ec.message());
