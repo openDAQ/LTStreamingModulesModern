@@ -16,6 +16,10 @@
 
 #pragma once
 
+#include <memory>
+
+#include <boost/asio/any_io_executor.hpp>
+
 #include <opendaq/opendaq.h>
 
 #include <ws-streaming/local_signal.hpp>
@@ -32,7 +36,8 @@ class WsStreamingListener
         WsStreamingListener(
             IContext *context,
             ISignal *signal,
-            wss::local_signal *localSignal);
+            std::shared_ptr<wss::local_signal> localSignal,
+            boost::asio::any_io_executor executor);
 
         ~WsStreamingListener() override;
 
@@ -50,11 +55,12 @@ class WsStreamingListener
 
     private:
 
-        SignalPtr           _signal;
-        InputPortConfigPtr  _port;
-        DataDescriptorPtr   _lastDescriptor;
-        wss::local_signal&  _localSignal;
-        bool                _ruleType;
+        SignalPtr                       _signal;
+        InputPortConfigPtr              _port;
+        DataDescriptorPtr               _lastDescriptor;
+        std::shared_ptr<wss::local_signal> _localSignal;
+        boost::asio::any_io_executor    _executor;
+        bool                            _ruleType;
 };
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
