@@ -485,10 +485,12 @@ void WsStreamingServer::onClientConnected(
     if (_rootDevice.assigned() && !_rootDevice.isRemoved())
     {
         std::string endpointAddress;
+        bool secureChannel = false;
         try
         {
-            auto remoteEp = connection->socket().remote_endpoint();
-            endpointAddress = remoteEp.address().to_string();
+            const auto& socket = connection->socket();
+            endpointAddress = socket.remote_endpoint().address().to_string();
+            secureChannel = _wss_channel_enabled && socket.local_endpoint().port() == _wss_port;
         }
         catch (const std::exception& /*e*/)
         {
@@ -498,7 +500,7 @@ void WsStreamingServer::onClientConnected(
             &clientNumber,
             ConnectedClientInfo(endpointAddress,
                 ProtocolType::Streaming,
-                CONST_LT_PROTOCOL_GROUP_ID,
+                secureChannel ? CONST_LTS_STREAMING_ID : CONST_LT_STREAMING_ID,
                 "",
                 ""));
     }
