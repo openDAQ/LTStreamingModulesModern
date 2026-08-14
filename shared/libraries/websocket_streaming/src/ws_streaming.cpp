@@ -492,7 +492,9 @@ std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::resolveDomainEntry(
     domainEntry->isHiddenDomain = true;
 
     // process its already-received metadata now so it publishes before the referencing signal
-    onRemoteSignalMetadataChanged(domainEntry);
+    // (if the metadata hasn't arrived yet, its later arrival publishes the entry instead)
+    if (!domainSignal->metadata().json().empty())
+        onRemoteSignalMetadataChanged(domainEntry);
 
     return domainEntry;
 }
