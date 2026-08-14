@@ -1,0 +1,125 @@
+name: Build LT streaming module stagings
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # the core stagings the modules build against
+  CORE_STAGING: ghcr.io/${{ github.repository_owner }}/test/staging/opendaq
+
+jobs:
+  resolve:
+    name: Resolve staging jobs
+    runs-on: ubuntu-latest
+    outputs:
+      include-jobs: ${{ steps.jobs.outputs.include-jobs }}
+      staging-pull: ${{ steps.jobs.outputs.staging-pull }}
+      packages: ${{ steps.jobs.outputs.packages }}
+      staging-push: ${{ steps.jobs.outputs.staging-push }}
+    steps:
+      - name: Resolve staging jobs
+        id: jobs
+        shell: python3 {0}
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REF: ${{ github.ref }}
+          CORE: ${{ env.CORE_STAGING }}
+        run: |
+          import json, os
+
+          # every job pulls the core staging built the same way, selected by the annotations
+          # that name it
+          JOBS = {
+              "windows-2022-x86_64-msvs-v143-release":   {"platform": "windows",        "arch": "x86_64"},
+              "windows-2022-x86-msvs-v143-release":      {"platform": "windows",        "arch": "x86"},
+              "manylinux_2_28-x86_64-ninja-gcc-release": {"platform": "manylinux_2_28", "arch": "x86_64"},
+              "ubuntu-22.04-x86_64-ninja-gcc-release":   {"platform": "linux",          "arch": "x86_64"},
+              "ubuntu-22.04-armv8-ninja-gcc-release":    {"platform": "linux",          "arch": "armv8"},
+              "macos-26-x86_64-ninja-appleclang-release":{"platform": "macos",          "arch": "x86_64"},
+              "macos-26-armv8-ninja-appleclang-release": {"platform": "macos",          "arch": "armv8"},
+          }
+
+          owner = os.environ["OWNER"]
+          ref   = os.environ["REF"]
+          core  = os.environ["CORE"]
+
+          if ref.startswith("refs/heads/release/"):
+              channel = "stable"
+          elif ref == "refs/heads/main":
+              channel = "dev"
+          else:
+              channel = "test"
+
+          resolved = {
+              "include-jobs": list(JOBS),
+              "staging-pull": [{
+                  "artifact": f"core-{job}",
+                  "packages": [{
+                      "path": core,
+                      "tag": "latest",
+                      "annotations": {
+                          "com.opendaq.custom.platform": settings["platform"],
+                          "com.opendaq.settings.arch": settings["arch"],
+                      },
+                  }],
+              } for job, settings in JOBS.items()],
+              "packages": [{
+                  "match-jobs": [job],
+                  "artifacts": [{"name": f"core-{job}", "dir": "staging-deps"}],
+              } for job in JOBS],
+              "staging-push": [{
+                  "path": f"ghcr.io/{owner}/{channel}/staging/lt-streaming-modules",
+                  "artifacts": ["staging-*/lt-streaming"],
+                  "tags": ["latest"],
+              }],
+          }
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              for key, value in resolved.items():
+                  f.write(f"{key}={json.dumps(value)}\n")
+
+          print(json.dumps(resolved, indent=2))
+
+  stage:
+    needs: resolve
+    name: LtStreamingModulesModern
+    permissions:
+      contents: read
+      packages: write
+    uses: openDAQ/openDAQ-CI/.github/workflows/stage.yml@jira/TBBAS-3439-multi-staging
+    with:
+      timeout: '[{"timeout-minutes": 180}]'
+      staging-pull: ${{ needs.resolve.outputs.staging-pull }}
+      include-jobs: ${{ needs.resolve.outputs.include-jobs }}
+      packages: ${{ needs.resolve.outputs.packages }}
+      cmake-presets: >
+        [
+          {
+            "match-jobs": ["*"],
+            "configure-preset": "stage",
+            "cache-variables":
+            {
+              "CMAKE_PREFIX_PATH": "${sourceDir}/staging-deps;${sourceDir}/staging-deps/opt/opendaq"
+            }
+          },
+          {
+            "match-jobs": ["macos-*"],
+            "cache-variables": {"CMAKE_OSX_DEPLOYMENT_TARGET": "10.15"}
+          }
+        ]
+      cpack-presets: >
+        [
+          {
+            "match-jobs": ["*"],
+            "stagings": [{"name": "lt-streaming"}]
+          }
+        ]
+      staging-push: ${{ needs.resolve.outputs.staging-push }}
