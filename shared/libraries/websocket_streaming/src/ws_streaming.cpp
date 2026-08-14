@@ -23,6 +23,7 @@
 
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/asio/error.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/endian/conversion.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -122,6 +123,20 @@ void WsStreaming::onRemoveSignal(const MirroredSignalConfigPtr& signal)
 
 void WsStreaming::onSubscribeSignal(const StringPtr& signalId)
 {
+    // called on application threads; the signals map may only be touched on the I/O thread
+    boost::asio::post(ioContext,
+        [this, id = signalId.toStdString()] { subscribeRemoteSignal(id); });
+}
+
+void WsStreaming::onUnsubscribeSignal(const StringPtr& signalId)
+{
+    // called on application threads; the signals map may only be touched on the I/O thread
+    boost::asio::post(ioContext,
+        [this, id = signalId.toStdString()] { unsubscribeRemoteSignal(id); });
+}
+
+void WsStreaming::subscribeRemoteSignal(const std::string& signalId)
+{
     LOG_I("Asked to subscribe signal {}", signalId);
 
     if (auto signalIt = signals.find(signalId); signalIt != signals.end())
@@ -152,7 +167,7 @@ void WsStreaming::onSubscribeSignal(const StringPtr& signalId)
     }
 }
 
-void WsStreaming::onUnsubscribeSignal(const StringPtr& signalId)
+void WsStreaming::unsubscribeRemoteSignal(const std::string& signalId)
 {
     LOG_I("Asked to unsubscribe signal {}", signalId);
 

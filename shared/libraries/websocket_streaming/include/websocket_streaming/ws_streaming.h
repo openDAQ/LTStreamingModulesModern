@@ -141,6 +141,12 @@ class WsStreaming : public Streaming
             const boost::system::error_code& ec,
             wss::connection_ptr connection);
 
+        /*! @brief I/O-thread implementation of onSubscribeSignal(). */
+        void subscribeRemoteSignal(const std::string& signalId);
+
+        /*! @brief I/O-thread implementation of onUnsubscribeSignal(). */
+        void unsubscribeRemoteSignal(const std::string& signalId);
+
         /*! @brief Creates a tracking entry for a remote signal and connects its event slots. */
         std::shared_ptr<WsStreamingRemoteSignalEntry> createSignalEntry(wss::remote_signal_ptr signal);
 
