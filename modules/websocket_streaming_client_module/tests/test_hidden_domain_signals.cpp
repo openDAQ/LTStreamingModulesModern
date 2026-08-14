@@ -1,4 +1,4 @@
-/*
+﻿/*
  * End-to-end tests for the streaming client against a fake LT peer that mimics devices which
  * do not advertise their time signals ("hidden" domain signals referenced via "relatedSignals"
  * with an abstract table id) and which may drop command-interface requests.
@@ -265,10 +265,22 @@ class FakeLtPeer
         unsigned valueSubscribeRequests = 0;
 };
 
-DevicePtr connectDevice(const ModulePtr& module, std::uint16_t port)
+// An Instance owns the device so that teardown runs the device's removal path;
+// creating a device directly from the module would leak it (and fail the leak listener)
+InstancePtr createClientInstance()
 {
-    return module.createDevice(
-        "daq.lt://127.0.0.1:" + std::to_string(port) + "/", nullptr);
+    auto instance = Instance("[[none]]");
+
+    ModulePtr module;
+    createModule(&module, instance.getContext());
+    instance.getModuleManager().addModule(module);
+
+    return instance;
+}
+
+DevicePtr connectDevice(const InstancePtr& instance, std::uint16_t port)
+{
+    return instance.addDevice("daq.lt://127.0.0.1:" + std::to_string(port) + "/");
 }
 
 // Polls until the device exposes the expected number of signals or the timeout elapses.
@@ -299,13 +311,6 @@ SignalPtr findSignalByName(const ListPtr<ISignal>& signals, const std::string& n
     return nullptr;
 }
 
-ModulePtr createClientModule()
-{
-    ModulePtr module;
-    createModule(&module, NullContext());
-    return module;
-}
-
 }  // namespace
 
 using HiddenDomainSignalsTest = testing::Test;
@@ -313,8 +318,8 @@ using HiddenDomainSignalsTest = testing::Test;
 TEST_F(HiddenDomainSignalsTest, HiddenDomainSignalIsLinked)
 {
     FakeLtPeer peer({});
-    auto module = createClientModule();
-    auto device = connectDevice(module, peer.port());
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
 
     auto signals = waitForSignals(device, 2, 5s);
     ASSERT_EQ(signals.getCount(), 2u);
@@ -335,8 +340,8 @@ TEST_F(HiddenDomainSignalsTest, DomainMetadataArrivingLateIsStillLinked)
     options.timeMetadataDelay = 300ms;
 
     FakeLtPeer peer(options);
-    auto module = createClientModule();
-    auto device = connectDevice(module, peer.port());
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
 
     auto signals = waitForSignals(device, 2, 5s);
     ASSERT_EQ(signals.getCount(), 2u);
@@ -354,8 +359,8 @@ TEST_F(HiddenDomainSignalsTest, DroppedSubscribeRequestIsRetried)
     options.dropSubscribeRequests = 1;
 
     FakeLtPeer peer(options);
-    auto module = createClientModule();
-    auto device = connectDevice(module, peer.port());
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
 
     // the sweep timer retries after 1.5 s + 100 ms; allow generous margin
     auto signals = waitForSignals(device, 2, 10s);
@@ -374,8 +379,8 @@ TEST_F(HiddenDomainSignalsTest, SignalPublishesWithoutDomainWhenMetadataNeverArr
     options.withholdTimeMetadata = true;
 
     FakeLtPeer peer(options);
-    auto module = createClientModule();
-    auto device = connectDevice(module, peer.port());
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
 
     // deferral gives up after two sweep periods (~3 s); allow generous margin
     auto signals = waitForSignals(device, 1, 10s);
