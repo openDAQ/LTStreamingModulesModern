@@ -195,6 +195,10 @@ void WsStreaming::onConnected(
 
 std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::createSignalEntry(wss::remote_signal_ptr signal)
 {
+    // an entry may already exist if a signal discovered as a hidden domain is later advertised
+    if (auto it = signals.find(signal->id()); it != signals.end())
+        return it->second;
+
     auto entry = std::make_shared<WsStreamingRemoteSignalEntry>();
     entry->ptr = signal;
 
@@ -463,7 +467,10 @@ std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::resolveDomainEntry(
                     && related.value("type", std::string()) == "time"
                     && related.contains("signalId")
                     && related["signalId"].is_string())
+            {
                 domainSignalId = related["signalId"];
+                break;  // first "time" entry wins
+            }
 
     if (domainSignalId.empty() || domainSignalId == entry->ptr->id())
         return nullptr;
