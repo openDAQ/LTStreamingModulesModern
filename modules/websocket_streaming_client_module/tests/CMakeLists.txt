@@ -2,6 +2,7 @@ set(MODULE_NAME ws_stream_cl_module)
 set(TEST_APP test_${MODULE_NAME})
 
 set(TEST_SOURCES test_websocket_streaming_client_module.cpp
+                 test_hidden_domain_signals.cpp
                  test_app.cpp
 )
 
@@ -10,6 +11,7 @@ add_executable(${TEST_APP} ${TEST_SOURCES}
 
 target_link_libraries(${TEST_APP} PRIVATE daq::opendaq_test_utils gtest
                                           ${OPENDAQ_SDK_TARGET_NAMESPACE}::${MODULE_NAME}
+                                          ws-streaming::ws-streaming
 )
 
 add_test(NAME ${TEST_APP}
