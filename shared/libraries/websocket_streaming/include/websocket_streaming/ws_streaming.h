@@ -25,6 +25,7 @@
 #include <thread>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/signals2/connection.hpp>
 #include <boost/signals2/signal.hpp>
 #include <boost/system/error_code.hpp>
@@ -164,6 +165,10 @@ class WsStreaming : public Streaming
         std::shared_ptr<WsStreamingRemoteSignalEntry> resolveDomainEntry(
             const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 
+        void armInitialFetchSweep();
+        void onInitialFetchSweep(const boost::system::error_code& ec);
+        void onInitialFetchResubscribe(const boost::system::error_code& ec);
+
         boost::asio::io_context ioContext;
         std::thread thread;
 
@@ -171,6 +176,10 @@ class WsStreaming : public Streaming
         wss::connection_ptr wsConnection;
 
         std::map<std::string, std::shared_ptr<WsStreamingRemoteSignalEntry>> signals;
+
+        /** Re-subscribes signals whose initial metadata fetch was dropped (some devices drop concurrent requests). */
+        boost::asio::steady_timer initialFetchTimer;
+        bool initialFetchSweepArmed = false;
 
         std::promise<boost::system::error_code> promise;
 };

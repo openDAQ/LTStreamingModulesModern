@@ -15,12 +15,14 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <functional>
 #include <memory>
 #include <string>
 
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/endian/conversion.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -37,6 +39,11 @@
 using namespace std::placeholders;
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
+
+// Initial-fetch retry tuning, measured against a real device (burst metadata <= ~1.1 s; >= 50 ms unsub/sub gap keeps ordering).
+static constexpr unsigned INITIAL_FETCH_MAX_ATTEMPTS = 3;
+static constexpr std::chrono::milliseconds INITIAL_FETCH_TIMEOUT{1500};
+static constexpr std::chrono::milliseconds INITIAL_FETCH_RETRY_DELAY{100};
 
 StreamingTypePtr WsStreaming::createType()
 {
@@ -55,6 +62,7 @@ WsStreaming::WsStreaming(
     : Streaming(connectionString, context, true)
     , ioContext{1}
     , wsClient(ioContext.get_executor())
+    , initialFetchTimer(ioContext)
 {
     // The ws-streaming library wants a URL like ws://1.2.3.4:7418/foo.
     // So we simply need to replace the daq.lt:// prefix with ws://.
@@ -206,11 +214,88 @@ void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
 {
     LOG_I("Signal available: {}", signal->id());
 
-    createSignalEntry(signal);
+    auto entry = createSignalEntry(signal);
 
     // Do not immediately register the new signal with openDAQ. We need its metadata first so
     // we can make an openDAQ descriptor. Do an initial subscribe to get that metadata.
+    entry->initialFetchAttempts = 1;
+    entry->initialFetchActive = true;
     signal->subscribe();
+
+    armInitialFetchSweep();
+}
+
+void WsStreaming::armInitialFetchSweep()
+{
+    if (initialFetchSweepArmed)
+        return;
+
+    initialFetchSweepArmed = true;
+    initialFetchTimer.expires_after(INITIAL_FETCH_TIMEOUT);
+    initialFetchTimer.async_wait(std::bind(&WsStreaming::onInitialFetchSweep, this, _1));
+}
+
+void WsStreaming::onInitialFetchSweep(const boost::system::error_code& ec)
+{
+    if (ec == boost::asio::error::operation_aborted)
+        return;
+
+    bool retrying = false;
+
+    for (const auto& [id, entry] : signals)
+    {
+        if (!entry->initialFetchActive || entry->isPublished)
+            continue;
+
+        entry->initialFetchActive = false;
+        entry->ptr->unsubscribe();
+
+        if (entry->initialFetchAttempts >= INITIAL_FETCH_MAX_ATTEMPTS)
+        {
+            LOG_W("No metadata received for signal {}; giving up (without a descriptor the signal cannot be added to openDAQ)", id);
+            entry->initialFetchAttempts = 0;
+        }
+        else
+        {
+            ++entry->initialFetchAttempts;
+            retrying = true;
+        }
+    }
+
+    if (retrying)
+    {
+        // stay marked busy so a new arrival cannot re-arm the timer and cancel this resubscribe
+        initialFetchTimer.expires_after(INITIAL_FETCH_RETRY_DELAY);
+        initialFetchTimer.async_wait(std::bind(&WsStreaming::onInitialFetchResubscribe, this, _1));
+    }
+
+    else
+    {
+        initialFetchSweepArmed = false;
+    }
+}
+
+void WsStreaming::onInitialFetchResubscribe(const boost::system::error_code& ec)
+{
+    if (ec == boost::asio::error::operation_aborted)
+        return;
+
+    initialFetchSweepArmed = false;
+    bool pending = false;
+
+    for (const auto& [id, entry] : signals)
+    {
+        // attempts >= 2 selects signals the sweep unsubscribed (fresh are at 1, given-up at 0)
+        if (entry->isPublished || entry->initialFetchActive || entry->initialFetchAttempts < 2)
+            continue;
+
+        entry->initialFetchActive = true;
+        entry->ptr->subscribe();
+        pending = true;
+    }
+
+    if (pending)
+        armInitialFetchSweep();
 }
 
 void WsStreaming::onRemoteSignalSubscribed(std::weak_ptr<WsStreamingRemoteSignalEntry> weakEntry)
@@ -277,7 +362,8 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
     }
     if (entry->descriptor.assigned() && !entry->isPublished)
     {
-        LOG_I("Signal {} is now ready, publishing it", entry->ptr->id());
+        LOG_I("Signal {} is now ready, publishing it{}",
+            entry->ptr->id(), entry->isHiddenDomain ? " (hidden domain signal)" : "");
         entry->isPublished = true;
         addToAvailableSignals(entry->ptr->id());
         onSignalAvailable(
@@ -285,9 +371,13 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
             entry->domainEntry && entry->domainEntry->isPublished ? entry->domainEntry->ptr : nullptr,
             entry->descriptor);
 
-        // hidden domain signals have no initial subscription to release
-        if (!entry->isHiddenDomain)
+        // release the initial metadata-fetch subscription, if one is active
+        if (entry->initialFetchActive)
+        {
+            entry->initialFetchActive = false;
             entry->ptr->unsubscribe();
+        }
+        entry->initialFetchAttempts = 0;
     }
 }
 

@@ -65,6 +65,8 @@ struct WsStreamingRemoteSignalEntry
     bool isSubscribed = false;
 
     bool isHiddenDomain = false;        /**< Discovered as a hidden domain signal via "relatedSignals", not advertised as 'available'. */
+    unsigned initialFetchAttempts = 0;  /**< Subscribe requests sent by the initial metadata fetch; 0 if never fetched or given up on. */
+    bool initialFetchActive = false;    /**< An initial metadata-fetch subscription is currently active for this signal. */
 };
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
