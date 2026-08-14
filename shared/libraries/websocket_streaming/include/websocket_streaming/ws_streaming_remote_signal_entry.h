@@ -63,6 +63,8 @@ struct WsStreamingRemoteSignalEntry
 
     bool isPublished = false;
     bool isSubscribed = false;
+
+    bool isHiddenDomain = false;        /**< Discovered as a hidden domain signal via "relatedSignals", not advertised as 'available'. */
 };
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING

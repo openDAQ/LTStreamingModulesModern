@@ -185,10 +185,8 @@ void WsStreaming::onConnected(
         std::bind(&WsStreaming::onRemoteSignalUnavailable, this, _1));
 }
 
-void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
+std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::createSignalEntry(wss::remote_signal_ptr signal)
 {
-    LOG_I("Signal available: {}", signal->id());
-
     auto entry = std::make_shared<WsStreamingRemoteSignalEntry>();
     entry->ptr = signal;
 
@@ -199,7 +197,16 @@ void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
     entry->onDataReceived       = signal->on_data_received      .connect(std::bind(&WsStreaming::onRemoteSignalDataReceived,    this, weakEntry, _1, _2, _3, _4));
     entry->onUnsubscribed       = signal->on_unsubscribed       .connect(std::bind(&WsStreaming::onRemoteSignalUnsubscribed,    this, weakEntry));
 
-    signals[signal->id()] = std::move(entry);
+    signals[signal->id()] = entry;
+
+    return entry;
+}
+
+void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
+{
+    LOG_I("Signal available: {}", signal->id());
+
+    createSignalEntry(signal);
 
     // Do not immediately register the new signal with openDAQ. We need its metadata first so
     // we can make an openDAQ descriptor. Do an initial subscribe to get that metadata.
@@ -233,19 +240,15 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
     {
         entry->lastPacket = nullptr;
         entry->descriptor = metadataToDescriptor(entry->ptr->metadata());
+        entry->domainEntry = resolveDomainEntry(entry);
 
-        std::string tableId = entry->ptr->metadata().table_id();
-
-        if (auto it = signals.find(tableId); it != signals.end()
-                && it->second != entry)
+        if (entry->domainEntry)
         {
-            entry->domainEntry = it->second;
-            LOG_I("Signal {} domain now points to {}", entry->ptr->id(), entry->domainEntry->ptr->id());
+            LOG_D("Signal {} domain now points to {}", entry->ptr->id(), entry->domainEntry->ptr->id());
         }
         else
         {
-            LOG_I("Signal {} domain now points to nullptr", entry->ptr->id());
-            entry->domainEntry = nullptr;
+            LOG_D("Signal {} domain now points to nullptr", entry->ptr->id());
         }
     }
 
@@ -262,16 +265,14 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
         auto packet = DataDescriptorChangedEventPacket(entry->descriptor, nullptr);
         onPacket(entry->ptr->id(), packet);
 
-        // changed signal is time signal
-        if (entry->ptr->id() == entry->ptr->metadata().table_id())
+        // propagate to signals that use this signal as their domain
+        packet = DataDescriptorChangedEventPacket(nullptr, entry->descriptor);
+        for (const auto& [id, dataSignalEntry] : signals)
         {
-            packet = DataDescriptorChangedEventPacket(nullptr, entry->descriptor);
-            for (const auto& [id, dataSignalEntry] : signals)
-            {
-                if (dataSignalEntry->ptr->metadata().table_id() == entry->ptr->id() &&
-                    dataSignalEntry != entry)
-                    onPacket(dataSignalEntry->ptr->id(), packet);
-            }
+            if (dataSignalEntry != entry &&
+                dataSignalEntry->domainEntry == entry &&
+                dataSignalEntry->isPublished)
+                onPacket(dataSignalEntry->ptr->id(), packet);
         }
     }
     if (entry->descriptor.assigned() && !entry->isPublished)
@@ -281,10 +282,63 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
         addToAvailableSignals(entry->ptr->id());
         onSignalAvailable(
             entry->ptr,
-            entry->domainEntry ? entry->domainEntry->ptr : nullptr,
+            entry->domainEntry && entry->domainEntry->isPublished ? entry->domainEntry->ptr : nullptr,
             entry->descriptor);
-        entry->ptr->unsubscribe();
+
+        // hidden domain signals have no initial subscription to release
+        if (!entry->isHiddenDomain)
+            entry->ptr->unsubscribe();
     }
+}
+
+std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::resolveDomainEntry(
+    const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry)
+{
+    std::string tableId = entry->ptr->metadata().table_id();
+
+    if (tableId.empty() || tableId == entry->ptr->id())
+        return nullptr;
+
+    // openDAQ servers advertise domain signals and use the domain signal's ID as the table ID
+    if (auto it = signals.find(tableId); it != signals.end() && it->second != entry)
+        return it->second;
+
+    // other devices reference a hidden domain signal via "relatedSignals"
+    std::string domainSignalId;
+    const auto& metadataJson = entry->ptr->metadata().json();
+
+    if (auto relatedIt = metadataJson.find("relatedSignals");
+            relatedIt != metadataJson.end() && relatedIt->is_array())
+        for (const auto& related : *relatedIt)
+            if (related.is_object()
+                    && related.value("type", std::string()) == "time"
+                    && related.contains("signalId")
+                    && related["signalId"].is_string())
+                domainSignalId = related["signalId"];
+
+    if (domainSignalId.empty() || domainSignalId == entry->ptr->id())
+        return nullptr;
+
+    if (auto it = signals.find(domainSignalId); it != signals.end() && it->second != entry)
+        return it->second;
+
+    if (!wsConnection)
+        return nullptr;
+
+    // the connection knows hidden signals: the peer's acks/metadata create remote signal objects
+    auto domainSignal = wsConnection->find_remote_signal(domainSignalId);
+    if (!domainSignal)
+        return nullptr;
+
+    LOG_D("Discovered hidden domain signal {} of signal {}", domainSignalId, entry->ptr->id());
+
+    auto domainEntry = createSignalEntry(domainSignal);
+    domainEntry->isHiddenDomain = true;
+
+    // process its already-received metadata now so it publishes before the referencing signal
+    onRemoteSignalMetadataChanged(domainEntry);
+
+    return domainEntry;
 }
 
 void WsStreaming::onRemoteSignalDataReceived(

@@ -140,6 +140,9 @@ class WsStreaming : public Streaming
             const boost::system::error_code& ec,
             wss::connection_ptr connection);
 
+        /*! @brief Creates a tracking entry for a remote signal and connects its event slots. */
+        std::shared_ptr<WsStreamingRemoteSignalEntry> createSignalEntry(wss::remote_signal_ptr signal);
+
         void onRemoteSignalAvailable(wss::remote_signal_ptr signal);
 
         void onRemoteSignalSubscribed(std::weak_ptr<WsStreamingRemoteSignalEntry> weakEntry);
@@ -156,6 +159,10 @@ class WsStreaming : public Streaming
         void onRemoteSignalUnsubscribed(std::weak_ptr<WsStreamingRemoteSignalEntry> weakEntry);
 
         void onRemoteSignalUnavailable(wss::remote_signal_ptr signal);
+
+        /*! @brief Finds a signal's domain entry by table ID or via "relatedSignals", discovering hidden domain signals on demand. */
+        std::shared_ptr<WsStreamingRemoteSignalEntry> resolveDomainEntry(
+            const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 
         boost::asio::io_context ioContext;
         std::thread thread;
