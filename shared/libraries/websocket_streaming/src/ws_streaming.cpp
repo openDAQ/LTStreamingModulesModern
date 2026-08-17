@@ -220,6 +220,11 @@ void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
 
     auto entry = createSignalEntry(signal);
 
+    // a reused entry (a hidden domain signal the device later advertises) needs no new fetch:
+    // it is already published, has its metadata, or a fetch is already in flight
+    if (entry->isPublished || entry->descriptor.assigned() || entry->initialFetchActive)
+        return;
+
     // Do not immediately register the new signal with openDAQ. We need its metadata first so
     // we can make an openDAQ descriptor. Do an initial subscribe to get that metadata.
     entry->initialFetchAttempts = 1;

@@ -88,6 +88,23 @@ class FakeLtPeer
             return valueSubscribeRequests;
         }
 
+        unsigned timeSubscribeRequestCount()
+        {
+            std::scoped_lock lock(mutex);
+            return timeSubscribeRequests;
+        }
+
+        // Advertises the previously hidden time signal in a second 'available' announcement
+        void advertiseTimeSignal()
+        {
+            boost::asio::post(ioc,
+                [this]
+                {
+                    if (peer)
+                        peer->send_metadata(0, "available", {{ "signalIds", { timeSignalId } }});
+                });
+        }
+
     private:
 
         void handleAccept(boost::asio::ip::tcp::socket socket)
@@ -162,6 +179,12 @@ class FakeLtPeer
 
                 respond(id, true);
                 sendValueSignalFamily();
+            }
+
+            else if (rpcMethod == "FAKE.subscribe" && signalId == timeSignalId)
+            {
+                std::scoped_lock lock(mutex);
+                ++timeSubscribeRequests;
             }
 
             else if (rpcMethod == "FAKE.unsubscribe")
@@ -263,6 +286,7 @@ class FakeLtPeer
 
         std::mutex mutex;
         unsigned valueSubscribeRequests = 0;
+        unsigned timeSubscribeRequests = 0;
 };
 
 // An Instance owns the device so that teardown runs the device's removal path;
@@ -370,6 +394,30 @@ TEST_F(HiddenDomainSignalsTest, DroppedSubscribeRequestIsRetried)
     auto valueSignal = findSignalByName(signals, "CH1.value");
     ASSERT_TRUE(valueSignal.assigned());
     ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
+}
+
+TEST_F(HiddenDomainSignalsTest, ReadvertisedHiddenDomainSignalStartsNoNewFetch)
+{
+    FakeLtPeer peer({});
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
+
+    auto signals = waitForSignals(device, 2, 5s);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    // the device now advertises the already-published hidden time signal
+    peer.advertiseTimeSignal();
+    std::this_thread::sleep_for(500ms);
+
+    // no duplicate signal, the domain link is intact, and no fetch subscribe was sent for it
+    signals = device.getSignals(search::Recursive(search::Any()));
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
+
+    ASSERT_EQ(peer.timeSubscribeRequestCount(), 0u);
 }
 
 TEST_F(HiddenDomainSignalsTest, SignalPublishesWithoutDomainWhenMetadataNeverArrives)
