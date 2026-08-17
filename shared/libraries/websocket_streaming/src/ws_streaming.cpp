@@ -244,7 +244,19 @@ void WsStreaming::onInitialFetchSweep(const boost::system::error_code& ec)
 
     for (const auto& [id, entry] : signals)
     {
-        if (!entry->initialFetchActive || entry->isPublished)
+        if (entry->isPublished)
+            continue;
+
+        // deferred entry: metadata arrived but the domain signal hasn't published;
+        // grant at least one full sweep period before dropping the domain link
+        if (entry->descriptor.assigned())
+        {
+            if (++entry->deferredSweeps >= 2)
+                publishSignalEntry(entry);
+            continue;
+        }
+
+        if (!entry->initialFetchActive)
             continue;
 
         entry->initialFetchActive = false;
@@ -272,6 +284,10 @@ void WsStreaming::onInitialFetchSweep(const boost::system::error_code& ec)
     else
     {
         initialFetchSweepArmed = false;
+
+        // signals may still be awaiting metadata or deferred on a domain signal
+        if (anyInitialFetchPending())
+            armInitialFetchSweep();
     }
 }
 
@@ -285,8 +301,10 @@ void WsStreaming::onInitialFetchResubscribe(const boost::system::error_code& ec)
 
     for (const auto& [id, entry] : signals)
     {
-        // attempts >= 2 selects signals the sweep unsubscribed (fresh are at 1, given-up at 0)
-        if (entry->isPublished || entry->initialFetchActive || entry->initialFetchAttempts < 2)
+        // attempts >= 2 selects signals the sweep unsubscribed (fresh are at 1, given-up at 0);
+        // an assigned descriptor means metadata already arrived (entry is deferred, not lost)
+        if (entry->isPublished || entry->initialFetchActive
+                || entry->descriptor.assigned() || entry->initialFetchAttempts < 2)
             continue;
 
         entry->initialFetchActive = true;
@@ -294,7 +312,8 @@ void WsStreaming::onInitialFetchResubscribe(const boost::system::error_code& ec)
         pending = true;
     }
 
-    if (pending)
+    // also stay armed for fetches that arrived during the retry delay and deferred entries
+    if (pending || anyInitialFetchPending())
         armInitialFetchSweep();
 }
 
@@ -362,23 +381,63 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
     }
     if (entry->descriptor.assigned() && !entry->isPublished)
     {
-        LOG_I("Signal {} is now ready, publishing it{}",
-            entry->ptr->id(), entry->isHiddenDomain ? " (hidden domain signal)" : "");
-        entry->isPublished = true;
-        addToAvailableSignals(entry->ptr->id());
-        onSignalAvailable(
-            entry->ptr,
-            entry->domainEntry && entry->domainEntry->isPublished ? entry->domainEntry->ptr : nullptr,
-            entry->descriptor);
-
-        // release the initial metadata-fetch subscription, if one is active
-        if (entry->initialFetchActive)
+        // defer until the domain publishes: publishSignalEntry() then publishes this signal too;
+        // if the domain never publishes, the sweep publishes this signal without the domain link
+        if (entry->domainEntry && !entry->domainEntry->isPublished)
         {
-            entry->initialFetchActive = false;
-            entry->ptr->unsubscribe();
+            LOG_D("Deferring signal {} until its domain signal {} is published",
+                entry->ptr->id(), entry->domainEntry->ptr->id());
+            armInitialFetchSweep();
         }
-        entry->initialFetchAttempts = 0;
+        else
+        {
+            publishSignalEntry(entry);
+        }
     }
+}
+
+void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry)
+{
+    LOG_I("Signal {} is now ready, publishing it{}",
+        entry->ptr->id(), entry->isHiddenDomain ? " (hidden domain signal)" : "");
+
+    if (entry->domainEntry && !entry->domainEntry->isPublished)
+    {
+        LOG_W("Signal {} is published without a link to its domain signal {}, which was never published",
+            entry->ptr->id(), entry->domainEntry->ptr->id());
+    }
+
+    entry->isPublished = true;
+
+    addToAvailableSignals(entry->ptr->id());
+    onSignalAvailable(
+        entry->ptr,
+        entry->domainEntry && entry->domainEntry->isPublished ? entry->domainEntry->ptr : nullptr,
+        entry->descriptor);
+
+    // release the initial metadata-fetch subscription, if one is active
+    if (entry->initialFetchActive)
+    {
+        entry->initialFetchActive = false;
+        entry->ptr->unsubscribe();
+    }
+    entry->initialFetchAttempts = 0;
+
+    // publish signals that were deferred waiting for this signal as their domain
+    for (const auto& [id, dependent] : signals)
+        if (dependent != entry && dependent->domainEntry == entry
+                && !dependent->isPublished && dependent->descriptor.assigned())
+            publishSignalEntry(dependent);
+}
+
+bool WsStreaming::anyInitialFetchPending() const
+{
+    // an entry with a descriptor but no publication is deferred, waiting for its domain signal
+    for (const auto& [id, entry] : signals)
+        if (!entry->isPublished && (entry->initialFetchActive || entry->descriptor.assigned()))
+            return true;
+
+    return false;
 }
 
 std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::resolveDomainEntry(

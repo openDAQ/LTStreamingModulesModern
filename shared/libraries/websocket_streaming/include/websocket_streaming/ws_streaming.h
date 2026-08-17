@@ -165,6 +165,12 @@ class WsStreaming : public Streaming
         std::shared_ptr<WsStreamingRemoteSignalEntry> resolveDomainEntry(
             const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 
+        /*! @brief Registers a signal with openDAQ, releases its initial-fetch subscription and publishes signals deferred on it. */
+        void publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
+
+        /*! @brief Checks whether any signal is still awaiting initial metadata or deferred on an unpublished domain signal. */
+        bool anyInitialFetchPending() const;
+
         void armInitialFetchSweep();
         void onInitialFetchSweep(const boost::system::error_code& ec);
         void onInitialFetchResubscribe(const boost::system::error_code& ec);
