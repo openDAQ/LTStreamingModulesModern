@@ -23,6 +23,7 @@
 
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/asio/error.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/endian/conversion.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -122,6 +123,20 @@ void WsStreaming::onRemoveSignal(const MirroredSignalConfigPtr& signal)
 
 void WsStreaming::onSubscribeSignal(const StringPtr& signalId)
 {
+    // called on application threads; the signals map may only be touched on the I/O thread
+    boost::asio::post(ioContext,
+        [this, id = signalId.toStdString()] { subscribeRemoteSignal(id); });
+}
+
+void WsStreaming::onUnsubscribeSignal(const StringPtr& signalId)
+{
+    // called on application threads; the signals map may only be touched on the I/O thread
+    boost::asio::post(ioContext,
+        [this, id = signalId.toStdString()] { unsubscribeRemoteSignal(id); });
+}
+
+void WsStreaming::subscribeRemoteSignal(const std::string& signalId)
+{
     LOG_I("Asked to subscribe signal {}", signalId);
 
     if (auto signalIt = signals.find(signalId); signalIt != signals.end())
@@ -152,7 +167,7 @@ void WsStreaming::onSubscribeSignal(const StringPtr& signalId)
     }
 }
 
-void WsStreaming::onUnsubscribeSignal(const StringPtr& signalId)
+void WsStreaming::unsubscribeRemoteSignal(const std::string& signalId)
 {
     LOG_I("Asked to unsubscribe signal {}", signalId);
 
@@ -418,11 +433,20 @@ void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSign
 
     entry->isPublished = true;
 
-    addToAvailableSignals(entry->ptr->id());
-    onSignalAvailable(
-        entry->ptr,
-        entry->domainEntry && entry->domainEntry->isPublished ? entry->domainEntry->ptr : nullptr,
-        entry->descriptor);
+    // a throw from here would escape into the Boost.Asio I/O thread and terminate the process
+    try
+    {
+        addToAvailableSignals(entry->ptr->id());
+        onSignalAvailable(
+            entry->ptr,
+            entry->domainEntry && entry->domainEntry->isPublished ? entry->domainEntry->ptr : nullptr,
+            entry->descriptor);
+    }
+
+    catch (const std::exception& ex)
+    {
+        LOG_E("Failed to register signal {} with openDAQ: {}", entry->ptr->id(), ex.what());
+    }
 
     // release the initial metadata-fetch subscription, if one is active
     if (entry->initialFetchActive)
