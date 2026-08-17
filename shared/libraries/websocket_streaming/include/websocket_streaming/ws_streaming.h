@@ -25,6 +25,7 @@
 #include <thread>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/signals2/connection.hpp>
 #include <boost/signals2/signal.hpp>
 #include <boost/system/error_code.hpp>
@@ -140,6 +141,15 @@ class WsStreaming : public Streaming
             const boost::system::error_code& ec,
             wss::connection_ptr connection);
 
+        /*! @brief I/O-thread implementation of onSubscribeSignal(). */
+        void subscribeRemoteSignal(const std::string& signalId);
+
+        /*! @brief I/O-thread implementation of onUnsubscribeSignal(). */
+        void unsubscribeRemoteSignal(const std::string& signalId);
+
+        /*! @brief Creates a tracking entry for a remote signal and connects its event slots. */
+        std::shared_ptr<WsStreamingRemoteSignalEntry> createSignalEntry(wss::remote_signal_ptr signal);
+
         void onRemoteSignalAvailable(wss::remote_signal_ptr signal);
 
         void onRemoteSignalSubscribed(std::weak_ptr<WsStreamingRemoteSignalEntry> weakEntry);
@@ -157,6 +167,20 @@ class WsStreaming : public Streaming
 
         void onRemoteSignalUnavailable(wss::remote_signal_ptr signal);
 
+        /*! @brief Finds a signal's domain entry by table ID or via "relatedSignals", discovering hidden domain signals on demand. */
+        std::shared_ptr<WsStreamingRemoteSignalEntry> resolveDomainEntry(
+            const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
+
+        /*! @brief Registers a signal with openDAQ, releases its initial-fetch subscription and publishes signals deferred on it. */
+        void publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
+
+        /*! @brief Checks whether any signal is still awaiting initial metadata or deferred on an unpublished domain signal. */
+        bool anyInitialFetchPending() const;
+
+        void armInitialFetchSweep();
+        void onInitialFetchSweep(const boost::system::error_code& ec);
+        void onInitialFetchResubscribe(const boost::system::error_code& ec);
+
         boost::asio::io_context ioContext;
         std::thread thread;
 
@@ -164,6 +188,10 @@ class WsStreaming : public Streaming
         wss::connection_ptr wsConnection;
 
         std::map<std::string, std::shared_ptr<WsStreamingRemoteSignalEntry>> signals;
+
+        /** Re-subscribes signals whose initial metadata fetch was dropped (some devices drop concurrent requests). */
+        boost::asio::steady_timer initialFetchTimer;
+        bool initialFetchSweepArmed = false;
 
         std::promise<boost::system::error_code> promise;
 };
