@@ -6,6 +6,7 @@
 - [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Retry initial metadata-fetch subscribes via a sweep timer, fixing signals that silently never appeared on devices that drop concurrent command-interface requests.
 - [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Defer publishing a signal until its domain signal is published, so the domain link is not lost when metadata arrives out of order; signals whose domain signal never publishes are published without the link after a timeout, with a warning.
 - Handle subscribe/unsubscribe requests on the I/O thread to avoid a data race on the signal map.
+- Guard signal publication so exceptions can no longer escape into the Boost.Asio I/O thread and terminate the process.
 
 ## Documenation
 

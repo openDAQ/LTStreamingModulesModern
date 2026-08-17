@@ -433,11 +433,20 @@ void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSign
 
     entry->isPublished = true;
 
-    addToAvailableSignals(entry->ptr->id());
-    onSignalAvailable(
-        entry->ptr,
-        entry->domainEntry && entry->domainEntry->isPublished ? entry->domainEntry->ptr : nullptr,
-        entry->descriptor);
+    // a throw from here would escape into the Boost.Asio I/O thread and terminate the process
+    try
+    {
+        addToAvailableSignals(entry->ptr->id());
+        onSignalAvailable(
+            entry->ptr,
+            entry->domainEntry && entry->domainEntry->isPublished ? entry->domainEntry->ptr : nullptr,
+            entry->descriptor);
+    }
+
+    catch (const std::exception& ex)
+    {
+        LOG_E("Failed to register signal {} with openDAQ: {}", entry->ptr->id(), ex.what());
+    }
 
     // release the initial metadata-fetch subscription, if one is active
     if (entry->initialFetchActive)
