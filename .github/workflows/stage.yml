@@ -1,6 +1,7 @@
 name: Build LT streaming module stagings
 
 on:
+  push:
   schedule:
     - cron: '0 2 * * 1'
   pull_request:
