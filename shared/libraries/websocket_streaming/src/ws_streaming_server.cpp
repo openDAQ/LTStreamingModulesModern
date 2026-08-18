@@ -14,11 +14,11 @@
  * limitations under the License.
  */
 
-#include <algorithm>
 #include <functional>
 #include <thread>
 #include <utility>
 
+#include <boost/asio/post.hpp>
 #include <boost/system/error_code.hpp>
 
 #include <opendaq/connected_client_info.h>
@@ -31,6 +31,7 @@
 
 #include <ws-streaming/ws-streaming.hpp>
 
+#include <websocket_streaming/constants.h>
 #include <websocket_streaming/descriptor_to_metadata.h>
 #include <websocket_streaming/ws_streaming_listener.h>
 #include <websocket_streaming/ws_streaming_server.h>
@@ -41,20 +42,7 @@ BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 
 PropertyObjectPtr WsStreamingServer::createDefaultConfig(const ContextPtr& context)
 {
-    constexpr Int minPortValue = 0;
-    constexpr Int maxPortValue = 65535;
-
-    auto defaultConfig = PropertyObject();
-
-    const auto websocketPortProp =
-        IntPropertyBuilder("WebsocketStreamingPort", 7414).setMinValue(minPortValue).setMaxValue(maxPortValue).build();
-    defaultConfig.addProperty(websocketPortProp);
-
-    const auto websocketControlPortProp =
-        IntPropertyBuilder("WebsocketControlPort", 7438).setMinValue(minPortValue).setMaxValue(maxPortValue).build();
-    defaultConfig.addProperty(websocketControlPortProp);
-
-    defaultConfig.addProperty(StringProperty("Path", "/"));
+    auto defaultConfig = createDefaultConfig();
 
     populateDefaultConfigFromProvider(context, defaultConfig);
     return defaultConfig;
@@ -86,6 +74,97 @@ void WsStreamingServer::populateDefaultConfigFromProvider(const ContextPtr& cont
     }
 }
 
+PropertyObjectPtr WsStreamingServer::createDefaultConfig()
+{
+    constexpr Int minPortValue = 0;
+    constexpr Int maxPortValue = 65535;
+
+    auto defaultConfig = PropertyObject();
+
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER, DEFAULT_ENABLE_WS_STREAMING_PORT);
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER, DEFAULT_ENABLE_WS_CONTROL_PORT);
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = IntPropertyBuilder(PROPERTY_WS_STREAMING_PORT_SERVER, DEFAULT_WS_STREAMING_PORT)
+                           .setMinValue(minPortValue)
+                           .setMaxValue(maxPortValue)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = IntPropertyBuilder(PROPERTY_WS_CONTROL_PORT_SERVER, DEFAULT_WS_CONTROL_PORT)
+                           .setMinValue(minPortValue)
+                           .setMaxValue(maxPortValue)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER, DEFAULT_ENABLE_WSS_STREAMING_PORT);
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_MTLS_SERVER, DEFAULT_ENABLE_MTLS)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = IntPropertyBuilder(PROPERTY_WSS_STREAMING_PORT_SERVER, DEFAULT_WSS_STREAMING_PORT)
+                           .setMinValue(minPortValue)
+                           .setMaxValue(maxPortValue)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_CERT_FILE_PATH_SERVER, DEFAULT_WSS_CERT_FILE_PATH)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_KEY_FILE_PATH_SERVER, DEFAULT_WSS_KEY_FILE_PATH)
+                           .setVisible(EvalValue(std::string("$") + PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER + " == 1"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_CA_CERT_FILE_PATH_SERVER, DEFAULT_WSS_CA_CERT_FILE_PATH)
+                           .setVisible(EvalValue(std::string("($") + PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER + " == 1) && ($" +
+                                                 PROPERTY_ENABLE_MTLS_SERVER + " == 1)"));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    defaultConfig.addProperty(StringProperty(PROPERTY_PATH_SERVER, "/"));
+    return defaultConfig;
+}
+
+void WsStreamingServer::addDefaultConfig(PropertyObjectPtr& config)
+{
+    if (!config.assigned())
+        return;
+
+    const auto defaultConfig = createDefaultConfig();
+    for (const auto& prop : defaultConfig.getAllProperties())
+    {
+        if (config.hasProperty(prop.getName()))
+            continue;
+
+        config.addProperty(prop.asPtr<IPropertyInternal>(true).clone());
+        config.setPropertyValue(prop.getName(), prop.getValue());
+    }
+}
+
 WsStreamingServer::WsStreamingServer(
         const InstancePtr& instance)
     : WsStreamingServer(
@@ -104,10 +183,67 @@ WsStreamingServer::WsStreamingServer(
     , _ioc{1}
     , _server{_ioc.get_executor()}
 {
-    _port = config.getPropertyValue("WebsocketStreamingPort");
+    // if the config does not contain all the default properties, add them to the config
+    addDefaultConfig(this->config);
 
-    _server.add_listener(config.getPropertyValue("WebsocketStreamingPort"));
-    _server.add_listener(config.getPropertyValue("WebsocketControlPort"), true);
+    _ws_channel_enabled = (this->config.getPropertyValue(PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER).asPtr<IBoolean>().getValue(False) == True);
+    _wss_channel_enabled = (this->config.getPropertyValue(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER).asPtr<IBoolean>().getValue(False) == True);
+    const bool control_channel_enabled =
+        (this->config.getPropertyValue(PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER).asPtr<IBoolean>().getValue(False) == True);
+
+    if (!_ws_channel_enabled && !_wss_channel_enabled)
+    {
+        DAQ_THROW_EXCEPTION(InvalidParameterException,
+                            "Neither the websocket streaming port nor the TLS streaming port is enabled");
+    }
+
+    if (control_channel_enabled && !_ws_channel_enabled)
+    {
+        DAQ_THROW_EXCEPTION(InvalidParameterException,
+                            "The control port cannot be enabled without the websocket streaming port");
+    }
+
+    if (_ws_channel_enabled)
+    {
+        _ws_port = config.getPropertyValue(PROPERTY_WS_STREAMING_PORT_SERVER);
+        _server.add_listener(_ws_port);
+    }
+    if (control_channel_enabled)
+    {
+        _server.add_listener(config.getPropertyValue(PROPERTY_WS_CONTROL_PORT_SERVER), true);
+    }
+
+    if (_wss_channel_enabled)
+    {
+        std::string ca_cert;
+        if (this->config.getPropertyValue(PROPERTY_ENABLE_MTLS_SERVER).asPtr<IBoolean>().getValue(False) == True)
+        {
+            ca_cert = this->config.getPropertyValue(PROPERTY_WSS_CA_CERT_FILE_PATH_SERVER).asPtr<IString>().toStdString();
+            if (ca_cert.empty())
+            {
+                DAQ_THROW_EXCEPTION(InvalidParameterException, "Mutual TLS is enabled but no CA certificate file path is configured");
+            }
+        }
+        std::string server_cert = this->config.getPropertyValue(PROPERTY_WSS_CERT_FILE_PATH_SERVER).asPtr<IString>().toStdString();
+        std::string server_key = this->config.getPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_SERVER).asPtr<IString>().toStdString();
+
+        if (server_cert.empty() || server_key.empty())
+        {
+            DAQ_THROW_EXCEPTION(InvalidParameterException, "TLS certificate or key file path is not configured");
+        }
+
+        _wss_port = this->config.getPropertyValue(PROPERTY_WSS_STREAMING_PORT_SERVER);
+
+        try
+        {
+            _server.add_tls_listener(_wss_port, server_cert, server_key, ca_cert);
+        }
+        catch (const std::exception& e)
+        {
+            DAQ_THROW_EXCEPTION(InvalidParameterException, "Cannot load the TLS secrets: {}", e.what());
+        }
+    }
+    _path = config.getPropertyValue(PROPERTY_PATH_SERVER).asPtr<IString>().toStdString();
 
     _onClientConnected = _server.on_client_connected.connect(
         std::bind(&WsStreamingServer::onClientConnected, this, _1));
@@ -118,16 +254,31 @@ WsStreamingServer::WsStreamingServer(
 
     rescan();
 
-    _thread = std::thread{[this]() { _ioc.run(); }};
-
-    context.getOnCoreEvent() += event(&WsStreamingServer::onCoreEvent);
-
+    // No destructor runs for a constructor that throws, so everything below must unwind on its own.
     addCapability();
+
+    try
+    {
+        context.getOnCoreEvent() += event(&WsStreamingServer::onCoreEvent);
+        _thread = std::thread{[this]() { _ioc.run(); }};
+    }
+    catch (...)
+    {
+        context.getOnCoreEvent() -= event(&WsStreamingServer::onCoreEvent);
+        removeCapability();
+        throw;
+    }
 }
 
 WsStreamingServer::~WsStreamingServer()
 {
-    onStopServer();
+    try
+    {
+        onStopServer();
+    }
+    catch (...)
+    {
+    }
 }
 
 wss::server& WsStreamingServer::getWsServer() noexcept
@@ -135,15 +286,33 @@ wss::server& WsStreamingServer::getWsServer() noexcept
     return _server;
 }
 
-PropertyObjectPtr WsStreamingServer::getDiscoveryConfig()
+ListPtr<IPropertyObject> WsStreamingServer::getDiscoveryConfigs()
 {
-    auto discoveryConfig = PropertyObject();
-    discoveryConfig.addProperty(StringProperty("ServiceName", "_streaming-lt._tcp.local."));
-    discoveryConfig.addProperty(StringProperty("ServiceCap", "LT"));
-    discoveryConfig.addProperty(StringProperty("Path", config.getPropertyValue("Path")));
-    discoveryConfig.addProperty(IntProperty("Port", config.getPropertyValue("WebsocketStreamingPort")));
-    discoveryConfig.addProperty(StringProperty("ProtocolVersion", ""));
-    return discoveryConfig;
+    auto discoveryConfigs = List<IPropertyObject>();
+    if (_ws_channel_enabled)
+    {
+        auto discoveryConfig = PropertyObject();
+        discoveryConfig.addProperty(StringProperty("ServiceName", CONST_LT_SERVICE_NAME));
+        discoveryConfig.addProperty(StringProperty("ServiceCap", CONST_SERVICE_CAPABILITY));
+        discoveryConfig.addProperty(StringProperty("Path", String(_path)));
+        discoveryConfig.addProperty(IntProperty("Port", Integer(_ws_port)));
+        discoveryConfig.addProperty(StringProperty("ProtocolVersion", ""));
+
+        discoveryConfigs.pushBack(std::move(discoveryConfig));
+    }
+
+    if (_wss_channel_enabled)
+    {
+        auto discoveryConfig = PropertyObject();
+        discoveryConfig.addProperty(StringProperty("ServiceName", CONST_LTS_SERVICE_NAME));
+        discoveryConfig.addProperty(StringProperty("ServiceCap", CONST_SERVICE_CAPABILITY));
+        discoveryConfig.addProperty(StringProperty("Path", String(_path)));
+        discoveryConfig.addProperty(IntProperty("Port", Integer(_wss_port)));
+        discoveryConfig.addProperty(StringProperty("ProtocolVersion", ""));
+
+        discoveryConfigs.pushBack(std::move(discoveryConfig));
+    }
+    return discoveryConfigs;
 }
 
 void WsStreamingServer::onStopServer()
@@ -156,10 +325,14 @@ void WsStreamingServer::onStopServer()
     // openDAQ can (but probably should not) call onStopServer() more than once.
     if (_thread.joinable())
     {
-        _ioc.stop();
+        // Close the ws-streaming server on its own I/O thread (it is not thread-safe): this cancels
+        // the listeners' pending accepts and closes every client connection, letting _ioc.run()
+        // drain and return so the thread can be joined.
+
+        boost::asio::post(_ioc, [this] { _server.close(); });
         _thread.join();
-        _server.close();
     }
+    removeCapability();
 }
 
 PropertyObjectPtr WsStreamingServer::populateDefaultConfig(
@@ -180,16 +353,65 @@ PropertyObjectPtr WsStreamingServer::populateDefaultConfig(
 void WsStreamingServer::addCapability()
 {
     auto info = _rootDevice.getInfo();
-    if (info.hasServerCapability("OpenDAQLTStreaming"))
-        DAQ_THROW_EXCEPTION(InvalidStateException,
-            fmt::format("Device \"{}\" already has an OpenDAQLTStreaming server capability.", info.getName()));
 
-    auto cap = ServerCapability("OpenDAQLTStreaming", "OpenDAQLTStreaming", ProtocolType::Streaming);
-    cap.setPrefix("daq.lt");
-    cap.setPort(_port);
-    cap.setConnectionType("TCP/IP");
-    info.asPtr<IDeviceInfoInternal>(true).addServerCapability(cap);
+    {
+        // If the device already has a ws-streaming or wss-streaming capability, throw an exception.
+        // It is not allowed adding the second instance of ws(s)-streaming server to the same device.
+        // If the device already has a ws-streaming and does not have wss-streaming capability (or vice versa),
+        // when first remove the existing server, then add the new one with both channels enabled.
+        if (info.hasServerCapability(CONST_LT_STREAMING_ID))
+            DAQ_THROW_EXCEPTION(InvalidStateException,
+                                fmt::format("Device \"{}\" already has an {} server capability.", info.getName(), CONST_LT_STREAMING_ID));
 
+        if (info.hasServerCapability(CONST_LTS_STREAMING_ID))
+            DAQ_THROW_EXCEPTION(InvalidStateException,
+                                fmt::format("Device \"{}\" already has an {} server capability.", info.getName(), CONST_LTS_STREAMING_ID));
+
+    }
+
+    if (_ws_channel_enabled)
+    {
+        auto cap = ServerCapability(CONST_LT_STREAMING_ID, CONST_LT_STREAMING_ID, ProtocolType::Streaming);
+        cap.setProtocolGroupId(CONST_LT_PROTOCOL_GROUP_ID);
+        cap.setProtocolSecurityLevel(CONST_LT_STREAMING_SECURITY_LVL);
+        cap.setPrefix(CONST_LT_STREAMING_PREFIX);
+        cap.setPort(_ws_port);
+        cap.setConnectionType("TCP/IP");
+        info.asPtr<IDeviceInfoInternal>(true).addServerCapability(cap);
+    }
+
+    if (_wss_channel_enabled)
+    {
+        auto cap = ServerCapability(CONST_LTS_STREAMING_ID, CONST_LTS_STREAMING_ID, ProtocolType::Streaming);
+        cap.setProtocolGroupId(CONST_LT_PROTOCOL_GROUP_ID);
+        cap.setProtocolSecurityLevel(CONST_LTS_STREAMING_SECURITY_LVL);
+        cap.setPrefix(CONST_LTS_STREAMING_PREFIX);
+        cap.setPort(_wss_port);
+        cap.setConnectionType("TCP/IP");
+        info.asPtr<IDeviceInfoInternal>(true).addServerCapability(cap);
+    }
+
+    _capability_added = _ws_channel_enabled || _wss_channel_enabled;
+}
+
+void WsStreamingServer::removeCapability()
+{
+    if (!_capability_added)
+        return;
+
+    _capability_added = false;
+
+    if (!_rootDevice.assigned() || _rootDevice.isRemoved())
+        return;
+
+    auto info = _rootDevice.getInfo();
+    if (!info.assigned())
+        return;
+
+    if (info.hasServerCapability(CONST_LT_STREAMING_ID))
+        info.asPtr<IDeviceInfoInternal>(true).removeServerCapability(CONST_LT_STREAMING_ID);
+    if (info.hasServerCapability(CONST_LTS_STREAMING_ID))
+        info.asPtr<IDeviceInfoInternal>(true).removeServerCapability(CONST_LTS_STREAMING_ID);
 }
 
 void WsStreamingServer::createListener(const SignalPtr& signal)
@@ -263,10 +485,12 @@ void WsStreamingServer::onClientConnected(
     if (_rootDevice.assigned() && !_rootDevice.isRemoved())
     {
         std::string endpointAddress;
+        bool secureChannel = false;
         try
         {
-            auto remoteEp = connection->socket().remote_endpoint();
-            endpointAddress = remoteEp.address().to_string();
+            const auto& socket = connection->socket();
+            endpointAddress = socket.remote_endpoint().address().to_string();
+            secureChannel = _wss_channel_enabled && socket.local_endpoint().port() == _wss_port;
         }
         catch (const std::exception& /*e*/)
         {
@@ -276,7 +500,7 @@ void WsStreamingServer::onClientConnected(
             &clientNumber,
             ConnectedClientInfo(endpointAddress,
                 ProtocolType::Streaming,
-                "OpenDAQLTStreaming",
+                secureChannel ? CONST_LTS_STREAMING_ID : CONST_LT_STREAMING_ID,
                 "",
                 ""));
     }

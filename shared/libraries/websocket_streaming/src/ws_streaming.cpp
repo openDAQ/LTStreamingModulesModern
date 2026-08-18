@@ -21,6 +21,9 @@
 #include <string>
 
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/asio/error.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/ssl/error.hpp>
 #include <boost/endian/conversion.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -29,6 +32,7 @@
 
 #include <ws-streaming/connection.hpp>
 #include <ws-streaming/remote_signal.hpp>
+#include "websocket_streaming/constants.h"
 
 #include <websocket_streaming/common.h>
 #include <websocket_streaming/metadata_to_descriptor.h>
@@ -38,37 +42,131 @@ using namespace std::placeholders;
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 
+namespace
+{
+bool isTlsRejection(bool isSecureChannel, const boost::system::error_code& ec)
+{
+    if (!isSecureChannel)
+        return false;
+
+    return ec == boost::asio::error::connection_aborted
+        || ec == boost::asio::error::connection_reset
+        || ec == boost::asio::error::broken_pipe
+        || ec == boost::asio::error::eof
+        || ec == boost::asio::ssl::error::stream_truncated;
+}
+
+}
+
 StreamingTypePtr WsStreaming::createType()
 {
     return StreamingTypeBuilder()
-        .setId("OpenDAQLTStreaming")
+        .setId(CONST_LT_STREAMING_ID)
         .setName("openDAQ WebSocket Streaming")
         .setDescription("Streaming from devices using the WebSocket Streaming Protocol")
         .setDefaultConfig(createDefaultConfig())
-        .setConnectionStringPrefix("daq.lt")
+        .setConnectionStringPrefix(CONST_LT_STREAMING_PREFIX)
+        .build();
+}
+
+StreamingTypePtr WsStreaming::createSecureType()
+{
+    return StreamingTypeBuilder()
+    .setId(CONST_LTS_STREAMING_ID)
+        .setName("openDAQ WebSocket Streaming")
+        .setDescription("Streaming from devices using the WebSocket Streaming Protocol and TLS encryption")
+        .setDefaultConfig(createDefaultSecureConfig())
+        .setConnectionStringPrefix(CONST_LTS_STREAMING_PREFIX)
         .build();
 }
 
 WsStreaming::WsStreaming(
         const StringPtr& connectionString,
-        const ContextPtr& context)
+        const ContextPtr& context,
+        const PropertyObjectPtr& config)
     : Streaming(connectionString, context, true)
     , ioContext{1}
     , wsClient(ioContext.get_executor())
 {
+    // NOTE! The 'port' property is not used there. The formed 'connectionString'
+    // must contain the port number.
+
     // The ws-streaming library wants a URL like ws://1.2.3.4:7418/foo.
-    // So we simply need to replace the daq.lt:// prefix with ws://.
+    // So we simply need to replace the daq.lt:// prefix with ws://
+    // and daq.lts:// with wss:// for secure channel
     auto wsConnectionString = connectionString.toStdString();
     boost::replace_all(wsConnectionString, "daq.lt://", "ws://");
     boost::replace_all(wsConnectionString, "daq.ws://", "ws://");
+    boost::replace_all(wsConnectionString, "daq.lts://", "wss://");
+    boost::replace_all(wsConnectionString, "daq.wss://", "wss://");
+    bool isSecureChannel = wsConnectionString.find("wss://") != std::string::npos;
+
+    const auto effectiveConfig = populateConfigFromDefault(config, isSecureChannel);
+
+    if (isSecureChannel)
+    {
+        LOG_I("Secure channel requested, enabling TLS");
+
+        if (effectiveConfig.getPropertyValue(PROPERTY_VERIFY_SERVER_CERT_CLIENT).asPtr<IBoolean>() == False)
+        {
+            LOG_W("Server certificate verification is disabled: the connection is encrypted, but the server "
+                  "is not authenticated. Your connection is vulnerable to man-in-the-middle attacks.");
+
+            try
+            {
+                wsClient.enable_tls_without_verification();
+            }
+            catch (const std::exception& e)
+            {
+                DAQ_THROW_EXCEPTION(InvalidParameterException, "Cannot enable TLS: {}", e.what());
+            }
+        }
+        else
+        {
+            std::string certFilePath;
+            std::string keyFilePath;
+            std::string caCertFilePath;
+            if (effectiveConfig.getPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT).asPtr<IBoolean>() == True)
+            {
+                certFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+                keyFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+
+                if (certFilePath.empty() || keyFilePath.empty())
+                    DAQ_THROW_EXCEPTION(InvalidParameterException, "TLS certificate or key file path is not configured");
+
+                LOG_I("mTLS enabled, using cert file: \'{}\' and key file: \'{}\'", certFilePath, keyFilePath);
+            }
+            else
+            {
+                LOG_I("mTLS disabled");
+            }
+
+            caCertFilePath = effectiveConfig.getPropertyValue(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).asPtr<IString>().toStdString();
+            if (caCertFilePath.empty())
+                DAQ_THROW_EXCEPTION(InvalidParameterException, "TLS CA certificate file path is not configured");
+
+            LOG_I("Using CA certificate file: \'{}\'", caCertFilePath);
+            LOG_I("Trying to load TLS secrets...");
+
+            try
+            {
+                wsClient.enable_tls(caCertFilePath, certFilePath, keyFilePath);
+            }
+            catch (const std::exception& e)
+            {
+                DAQ_THROW_EXCEPTION(InvalidParameterException, "Cannot load the TLS secrets: {}", e.what());
+            }
+        }
+    }
 
     // Start the ws-streaming connection attempt.
     LOG_I("Connecting to {}", wsConnectionString);
     wsClient.async_connect(wsConnectionString,
         std::bind(&WsStreaming::onConnected, this, _1, _2));
 
-    // Start a background thread to pump the Boost.Asio I/O context. The run() function will
-    // return when there is no more work or when ioContext.stop() is called in the destructor.
+    // Start a background thread to pump the Boost.Asio I/O context. The run() function returns
+    // when there is no more work: on the failed-connection path below via ioContext.stop(), and
+    // during normal teardown once the destructor closes the connection and the work drains.
     thread = std::thread{[this] { ioContext.run(); }};
 
     // Wait here until the connection is either established or failed.
@@ -78,26 +176,134 @@ WsStreaming::WsStreaming(
     {
         ioContext.stop();
         thread.join();
-        throw NotFoundException(
-            "Failed to connect to " + connectionString.toStdString() + ": " + std::to_string(ec.value()));
+
+        // A failure raised by the TLS layer means the peer was reached but not trusted.
+        // That is an authentication problem.
+        if (ec.category() == boost::asio::error::get_ssl_category())
+        {
+            DAQ_THROW_EXCEPTION(AuthenticationFailedException,
+                "TLS handshake with {} failed: {}. Check the server certificate and the configured "
+                "CA certificate, and the client certificate if mutual TLS is enabled",
+                connectionString.toStdString(), ec.message());
+        }
+
+        if (isTlsRejection(isSecureChannel, ec))
+        {
+            DAQ_THROW_EXCEPTION(AuthenticationFailedException,
+                "Failed to connect to {}: the peer closed the TLS connection during or right after "
+                "the handshake ({}). This usually means the server rejected the client certificate",
+                connectionString.toStdString(), ec.message());
+        }
+
+        DAQ_THROW_EXCEPTION(NotFoundException,
+            "Failed to connect to {}: {}", connectionString.toStdString(), ec.message());
     }
 }
 
 WsStreaming::~WsStreaming()
 {
-    // Stop the Boost.Asio I/O context (which may already have stopped naturally if the connection
-    // failed and there is no more scheduled work) so we can join and destroy the thread.
-    LOG_I("Stopping Boost.Asio I/O context thread");
-    ioContext.stop();
+    LOG_I("Closing streaming connection and stopping Boost.Asio I/O context thread");
+
+    // Tear the connection down on the I/O context's thread. The ws-streaming peer is not thread-safe,
+    // and the connections below and the 'signals' map are only ever touched from that thread, so all
+    // of this must run there rather than directly from the destructor.
+
+    // Note we deliberately do NOT call ioContext.stop(): stopping abandons in-flight operations
+    // instead of completing them, which corrupts the ssl::stream as it is destroyed
+    boost::asio::post(ioContext, [this]
+    {
+        onAvailableConnection.disconnect();
+        onUnavailableConnection.disconnect();
+
+        for (auto& [id, entry] : signals)
+        {
+            entry->onSubscribed.disconnect();
+            entry->onMetadataChanged.disconnect();
+            entry->onDataReceived.disconnect();
+            entry->onUnsubscribed.disconnect();
+        }
+
+        if (wsConnection)
+            wsConnection->close();
+    });
+
     thread.join();
-    wsConnection->close();
+}
+
+PropertyObjectPtr WsStreaming::populateConfigFromDefault(const PropertyObjectPtr& config, bool secure)
+{
+    const auto defaultConfig = secure ? createDefaultSecureConfig() : createDefaultConfig();
+
+    if (!config.assigned())
+        return defaultConfig;
+
+    for (const auto& prop : defaultConfig.getAllProperties())
+    {
+        if (config.hasProperty(prop.getName()))
+            continue;
+
+        config.addProperty(prop.asPtr<IPropertyInternal>(true).clone());
+        config.setPropertyValue(prop.getName(), prop.getValue());
+    }
+
+    return config;
 }
 
 PropertyObjectPtr WsStreaming::createDefaultConfig()
 {
     auto obj = PropertyObject();
-    obj.addProperty(IntProperty("Port", 7414));
+    obj.addProperty(IntProperty(PROPERTY_WS_STREAMING_PORT_CLIENT, DEFAULT_WS_STREAMING_PORT));
     return obj;
+}
+
+PropertyObjectPtr WsStreaming::createDefaultSecureConfig()
+{
+    constexpr Int minPortValue = 0;
+    constexpr Int maxPortValue = 65535;
+
+    auto defaultConfig = PropertyObject();
+
+    {
+        auto builder = IntPropertyBuilder(PROPERTY_WSS_STREAMING_PORT_CLIENT, DEFAULT_WSS_STREAMING_PORT)
+                           .setMinValue(minPortValue)
+                           .setMaxValue(maxPortValue);
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_VERIFY_SERVER_CERT_CLIENT, DEFAULT_VERIFY_SERVER_CERT);
+        defaultConfig.addProperty(builder.build());
+    }
+
+    const auto verifyingServer = std::string("$") + PROPERTY_VERIFY_SERVER_CERT_CLIENT + " == 1";
+    const auto verifyingServerWithMtls =
+        "(" + verifyingServer + ") && ($" + PROPERTY_ENABLE_MTLS_CLIENT + " == 1)";
+
+    {
+        auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_MTLS_CLIENT, DEFAULT_ENABLE_MTLS)
+                           .setVisible(EvalValue(verifyingServer));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_CERT_FILE_PATH_CLIENT, DEFAULT_WSS_CERT_FILE_PATH)
+                           .setVisible(EvalValue(verifyingServerWithMtls));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_KEY_FILE_PATH_CLIENT, DEFAULT_WSS_KEY_FILE_PATH)
+                           .setVisible(EvalValue(verifyingServerWithMtls));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    {
+        auto builder = StringPropertyBuilder(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT, DEFAULT_WSS_CA_CERT_FILE_PATH)
+                           .setVisible(EvalValue(verifyingServer));
+        defaultConfig.addProperty(builder.build());
+    }
+
+    return defaultConfig;
 }
 
 void WsStreaming::onSetActive(bool active)
@@ -179,9 +385,9 @@ void WsStreaming::onConnected(
     LOG_I("Connected to remote peer");
     wsConnection = connection;
 
-    wsConnection->on_available.connect(
+    onAvailableConnection = wsConnection->on_available.connect(
         std::bind(&WsStreaming::onRemoteSignalAvailable, this, _1));
-    wsConnection->on_unavailable.connect(
+    onUnavailableConnection = wsConnection->on_unavailable.connect(
         std::bind(&WsStreaming::onRemoteSignalUnavailable, this, _1));
 }
 

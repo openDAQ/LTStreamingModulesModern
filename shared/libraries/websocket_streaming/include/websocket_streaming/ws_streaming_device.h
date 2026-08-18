@@ -60,6 +60,17 @@ class WsStreamingDevice : public Device
         static DeviceTypePtr createNewType();
 
         /*!
+         * @brief Creates an openDAQ device type for the new-style `daq.lts://` connection string
+         * with secure TLS channel.
+         *
+         * @return An openDAQ device type for the new-style `daq.lts://` connection string.
+         */
+        static DeviceTypePtr createNewSecureType();
+
+        static PropertyObjectPtr createDefaultConfig();
+        static PropertyObjectPtr createDefaultSecureConfig();
+
+        /*!
          * @brief Opens a new WebSocket streaming connection.
          *
          * This constructor creates a new WsStreaming object using the specified connection
@@ -78,11 +89,10 @@ class WsStreamingDevice : public Device
             const ComponentPtr& parent,
             const StringPtr& localId,
             const StringPtr& connectionString,
-            const DeviceTypePtr& type);
+            const DeviceTypePtr& type,
+            const PropertyObjectPtr& config);
 
     protected:
-
-        static PropertyObjectPtr createDefaultConfig();
 
         void removed() override;
         void removedNoLock() override;

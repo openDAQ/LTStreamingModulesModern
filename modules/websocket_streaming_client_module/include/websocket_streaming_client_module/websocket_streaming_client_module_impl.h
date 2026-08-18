@@ -19,6 +19,8 @@
 #include <opendaq/module_impl.h>
 #include <daq_discovery/daq_discovery_client.h>
 
+class WebsocketStreamingClientModuleTest;
+
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING_CLIENT_MODULE
 
 class WebsocketStreamingClientModule final : public Module
@@ -32,18 +34,32 @@ public:
     DevicePtr onCreateDevice(const StringPtr& connectionString,
                              const ComponentPtr& parent,
                              const PropertyObjectPtr& config) override;
-    bool acceptsConnectionParameters(const StringPtr& connectionString, const PropertyObjectPtr& config);
-    bool acceptsStreamingConnectionParameters(const StringPtr& connectionString, const PropertyObjectPtr& config);
+    DAQ_WS_STREAM_CL_MODULE_API bool acceptsConnectionParameters(const StringPtr& connectionString, const PropertyObjectPtr& config);
+    DAQ_WS_STREAM_CL_MODULE_API bool acceptsStreamingConnectionParameters(const StringPtr& connectionString, const PropertyObjectPtr& config);
     StreamingPtr onCreateStreaming(const StringPtr& connectionString, const PropertyObjectPtr& config) override;
     Bool onCompleteServerCapability(const ServerCapabilityPtr& source, const ServerCapabilityConfigPtr& target) override;
 
 private:
-    static StringPtr createUrlConnectionString(const StringPtr& host,
-                                               const IntegerPtr& port,
-                                               const StringPtr& path);
-    static PropertyObjectPtr createDefaultConfig();
-    static StringPtr formConnectionString(const StringPtr& connectionString, const PropertyObjectPtr& config);
-    static DeviceInfoPtr populateDiscoveredDevice(const discovery::MdnsDiscoveredDevice& discoveredDevice);
+    friend class ::WebsocketStreamingClientModuleTest;
+
+    struct ConnectionParameters
+    {
+        std::string host;
+        std::uint16_t port = 0;
+        std::string prefix;
+        std::string path;
+    };
+
+    DAQ_WS_STREAM_CL_MODULE_API static StringPtr createUrlConnectionString(bool secureType,
+                                                                           const StringPtr& host,
+                                                                           const IntegerPtr& port,
+                                                                           const StringPtr& path);
+    DAQ_WS_STREAM_CL_MODULE_API static StringPtr formConnectionString(const StringPtr& connectionString,
+                                                                      const PropertyObjectPtr& config,
+                                                                      ConnectionParameters* outParams = nullptr);
+    DAQ_WS_STREAM_CL_MODULE_API static StringPtr formNewStyleConnectionString(const StringPtr& connectionString);
+    DAQ_WS_STREAM_CL_MODULE_API static DeviceInfoPtr populateDiscoveredDevice(const discovery::MdnsDiscoveredDevice& discoveredDevice);
+    DAQ_WS_STREAM_CL_MODULE_API static bool isSecureConnection(const std::string& connectionString);
 
     std::mutex sync;
     size_t deviceIndex;

@@ -15,6 +15,7 @@ set(SRC_Cpp
 
 set(SRC_PublicHeaders
     common.h
+    constants.h
     descriptor_to_metadata.h
     metadata_to_descriptor.h
     remote_signal_handler.h

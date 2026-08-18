@@ -19,3 +19,17 @@
 
 #define BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING_CLIENT_MODULE BEGIN_NAMESPACE_OPENDAQ_MODULE(websocket_streaming_client_module)
 #define END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING_CLIENT_MODULE END_NAMESPACE_OPENDAQ_MODULE
+
+#if !defined(DAQMODULES_LT_STREAMING_ENABLE_TESTS)
+    #define DAQ_WS_STREAM_CL_MODULE_API
+#else
+    #if defined(_WIN32)
+        #if defined(OPENDAQ_MODULE_DLL_IMPORT)
+            #define DAQ_WS_STREAM_CL_MODULE_API __declspec(dllimport)
+        #else
+            #define DAQ_WS_STREAM_CL_MODULE_API __declspec(dllexport)
+        #endif
+    #else
+        #define DAQ_WS_STREAM_CL_MODULE_API __attribute__((visibility("default")))
+    #endif
+#endif

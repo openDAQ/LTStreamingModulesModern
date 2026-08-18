@@ -79,6 +79,17 @@ class WsStreaming : public Streaming
          */
         static StreamingTypePtr createType();
 
+        /*!
+         * @brief Creates an openDAQ streaming type object using the `daq.lts://` prefix
+         * with secure TLS channel.
+         *
+         * @return An openDAQ streaming type object using the `daq.lts://` prefix.
+         */
+        static StreamingTypePtr createSecureType();
+
+        static PropertyObjectPtr createDefaultConfig();
+        static PropertyObjectPtr createDefaultSecureConfig();
+
     public:
 
         /*!
@@ -91,7 +102,8 @@ class WsStreaming : public Streaming
          */
         explicit WsStreaming(
             const StringPtr& connectionString,
-            const ContextPtr& context);
+            const ContextPtr& context,
+            const PropertyObjectPtr& config);
 
         /*!
          * @brief Destroys a streaming object and stops the Boost.Asio I/O context's thread.
@@ -126,8 +138,6 @@ class WsStreaming : public Streaming
 
     protected:
 
-        static PropertyObjectPtr createDefaultConfig();
-
         void onSetActive(bool active) override;
         void onAddSignal(const MirroredSignalConfigPtr& signal) override;
         void onRemoveSignal(const MirroredSignalConfigPtr& signal) override;
@@ -135,6 +145,8 @@ class WsStreaming : public Streaming
         void onUnsubscribeSignal(const StringPtr& signalId) override;
 
     private:
+
+        static PropertyObjectPtr populateConfigFromDefault(const PropertyObjectPtr& config, bool secure);
 
         void onConnected(
             const boost::system::error_code& ec,
@@ -162,6 +174,9 @@ class WsStreaming : public Streaming
 
         wss::client wsClient;
         wss::connection_ptr wsConnection;
+
+        boost::signals2::scoped_connection onAvailableConnection;
+        boost::signals2::scoped_connection onUnavailableConnection;
 
         std::map<std::string, std::shared_ptr<WsStreamingRemoteSignalEntry>> signals;
 

@@ -77,3 +77,8 @@ add_subdirectory(external)
 add_subdirectory(shared)
 add_subdirectory(modules)
 
+# End-to-end integration tests need both modules present
+if (${REPO_OPTION_PREFIX}_ENABLE_TESTS AND ${REPO_OPTION_PREFIX}_ENABLE_CLIENT AND ${REPO_OPTION_PREFIX}_ENABLE_SERVER)
+    add_subdirectory(tests)
+endif()
+

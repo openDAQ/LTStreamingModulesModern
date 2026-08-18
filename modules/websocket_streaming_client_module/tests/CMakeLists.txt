@@ -10,6 +10,8 @@ add_executable(${TEST_APP} ${TEST_SOURCES}
 
 target_link_libraries(${TEST_APP} PRIVATE daq::opendaq_test_utils gtest
                                           ${OPENDAQ_SDK_TARGET_NAMESPACE}::${MODULE_NAME}
+                                          daq::discovery
+                                          daq::websocket_streaming
 )
 
 add_test(NAME ${TEST_APP}
