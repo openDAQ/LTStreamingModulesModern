@@ -443,6 +443,37 @@ SignalPtr findSignalByName(const ListPtr<ISignal>& signals, const std::string& n
     return nullptr;
 }
 
+// Bundles the connected client so tests keep the owning Instance alive
+struct ClientSetup
+{
+    InstancePtr instance;
+    DevicePtr device;
+    ListPtr<ISignal> signals;
+};
+
+ClientSetup connectAndWaitForSignals(
+    const FakeLtPeer& peer,
+    size_t expectedCount = 2,
+    std::chrono::milliseconds timeout = 5s)
+{
+    ClientSetup setup;
+    setup.instance = createClientInstance();
+    setup.device = connectDevice(setup.instance, peer.port());
+    setup.signals = waitForSignals(setup.device, expectedCount, timeout);
+    return setup;
+}
+
+// Builds a Float64/Int64 stream reader on the signal, subscribing it
+auto buildStreamReader(const SignalPtr& signal)
+{
+    return daq::StreamReaderBuilder()
+        .setSignal(signal)
+        .setValueReadType(daq::SampleType::Float64)
+        .setDomainReadType(daq::SampleType::Int64)
+        .setSkipEvents(true)
+        .build();
+}
+
 }  // namespace
 
 using DeviceCompatibilityTest = testing::Test;
@@ -450,10 +481,7 @@ using DeviceCompatibilityTest = testing::Test;
 TEST_F(DeviceCompatibilityTest, HiddenDomainSignalIsLinked)
 {
     FakeLtPeer peer({});
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
-
-    auto signals = waitForSignals(device, 2, 5s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
 
     auto valueSignal = findSignalByName(signals, "CH1.value");
@@ -472,10 +500,7 @@ TEST_F(DeviceCompatibilityTest, DomainMetadataArrivingLateIsStillLinked)
     options.timeMetadataDelay = 300ms;
 
     FakeLtPeer peer(options);
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
-
-    auto signals = waitForSignals(device, 2, 5s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
 
     auto valueSignal = findSignalByName(signals, "CH1.value");
@@ -491,11 +516,9 @@ TEST_F(DeviceCompatibilityTest, DroppedSubscribeRequestIsRetried)
     options.dropSubscribeRequests = 1;
 
     FakeLtPeer peer(options);
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
 
     // the sweep timer retries after 1.5 s + 100 ms; allow generous margin
-    auto signals = waitForSignals(device, 2, 10s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 2, 10s);
     ASSERT_EQ(signals.getCount(), 2u);
     ASSERT_GE(peer.subscribeRequestCount(), 2u);
 
@@ -507,10 +530,7 @@ TEST_F(DeviceCompatibilityTest, DroppedSubscribeRequestIsRetried)
 TEST_F(DeviceCompatibilityTest, ReadvertisedHiddenDomainSignalStartsNoNewFetch)
 {
     FakeLtPeer peer({});
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
-
-    auto signals = waitForSignals(device, 2, 5s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
 
     // the device now advertises the already-published hidden time signal
@@ -531,10 +551,7 @@ TEST_F(DeviceCompatibilityTest, ReadvertisedHiddenDomainSignalStartsNoNewFetch)
 TEST_F(DeviceCompatibilityTest, ImmediateSubscribeTakesOverFetchSubscription)
 {
     FakeLtPeer peer({});
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
-
-    auto signals = waitForSignals(device, 2, 5s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
 
     auto valueSignal = findSignalByName(signals, "CH1.value");
@@ -547,12 +564,7 @@ TEST_F(DeviceCompatibilityTest, ImmediateSubscribeTakesOverFetchSubscription)
     mirrored.getOnSubscribeComplete() +=
         [&ackPromise](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr&) { ackPromise.set_value(); };
 
-    auto reader = daq::StreamReaderBuilder()
-        .setSignal(valueSignal)
-        .setValueReadType(daq::SampleType::Float64)
-        .setDomainReadType(daq::SampleType::Int64)
-        .setSkipEvents(true)
-        .build();
+    auto reader = buildStreamReader(valueSignal);
 
     // the takeover must acknowledge the subscription without any wire traffic
     ASSERT_EQ(ackFuture.wait_for(3s), std::future_status::ready);
@@ -572,22 +584,14 @@ TEST_F(DeviceCompatibilityTest, DataKeepsFlowingWhenDeviceReordersUnsubscribeAnd
     options.outOfOrderUnsubscribe = true;
     FakeLtPeer peer(options);
 
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
-
-    auto signals = waitForSignals(device, 2, 5s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
 
     auto valueSignal = findSignalByName(signals, "CH1.value");
     ASSERT_TRUE(valueSignal.assigned());
 
     // subscribe immediately after the signal appeared, like an auto-subscribing application
-    auto reader = daq::StreamReaderBuilder()
-        .setSignal(valueSignal)
-        .setValueReadType(daq::SampleType::Float64)
-        .setDomainReadType(daq::SampleType::Int64)
-        .setSkipEvents(true)
-        .build();
+    auto reader = buildStreamReader(valueSignal);
 
     // wait past the sweep window and discard the startup burst (the failure mode goes silent after it)
     std::this_thread::sleep_for(4s);
@@ -610,10 +614,7 @@ TEST_F(DeviceCompatibilityTest, SubscribeAfterRemoteUnsubscribeSendsNewRequest)
     options.streamData = true;
     FakeLtPeer peer(options);
 
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
-
-    auto signals = waitForSignals(device, 2, 5s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
 
     // the device drops the subscription on its own while it is held for takeover
@@ -623,12 +624,7 @@ TEST_F(DeviceCompatibilityTest, SubscribeAfterRemoteUnsubscribeSendsNewRequest)
     auto valueSignal = findSignalByName(signals, "CH1.value");
     ASSERT_TRUE(valueSignal.assigned());
 
-    auto reader = daq::StreamReaderBuilder()
-        .setSignal(valueSignal)
-        .setValueReadType(daq::SampleType::Float64)
-        .setDomainReadType(daq::SampleType::Int64)
-        .setSkipEvents(true)
-        .build();
+    auto reader = buildStreamReader(valueSignal);
 
     std::this_thread::sleep_for(1s);
     EXPECT_EQ(peer.subscribeRequestCount(), 2u);  // a real second subscribe request was sent
@@ -638,10 +634,7 @@ TEST_F(DeviceCompatibilityTest, SubscribeAfterRemoteUnsubscribeSendsNewRequest)
 TEST_F(DeviceCompatibilityTest, UnusedFetchSubscriptionIsReleasedBySweep)
 {
     FakeLtPeer peer({});
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
-
-    auto signals = waitForSignals(device, 2, 5s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
 
     // nobody subscribes: the sweep must release the held fetch subscription
@@ -658,11 +651,9 @@ TEST_F(DeviceCompatibilityTest, SignalPublishesWithoutDomainWhenMetadataNeverArr
     options.withholdTimeMetadata = true;
 
     FakeLtPeer peer(options);
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
 
     // deferral gives up after two sweep periods (~3 s); allow generous margin
-    auto signals = waitForSignals(device, 1, 10s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 1, 10s);
     ASSERT_EQ(signals.getCount(), 1u);
 
     auto valueSignal = findSignalByName(signals, "CH1.value");
