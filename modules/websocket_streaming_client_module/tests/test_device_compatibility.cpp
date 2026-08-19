@@ -108,6 +108,19 @@ class FakeLtPeer
             return valueUnsubscribeRequests;
         }
 
+        // Unilaterally ends the value-signal subscription, like a device dropping it on its own
+        void unsubscribeValueSignal()
+        {
+            boost::asio::post(ioc,
+                [this]
+                {
+                    if (!peer)
+                        return;
+                    valueSubscribed = false;
+                    peer->send_metadata(valueSigno, "unsubscribe", nlohmann::json::object());
+                });
+        }
+
         // Advertises the previously hidden time signal in a second 'available' announcement
         void advertiseTimeSignal()
         {
@@ -588,6 +601,38 @@ TEST_F(DeviceCompatibilityTest, DataKeepsFlowingWhenDeviceReordersUnsubscribeAnd
 
     std::this_thread::sleep_for(500ms);
     EXPECT_GT(reader.getAvailableCount(), 0u);
+}
+
+// A remote unsubscribe must end the held fetch subscription; a takeover of it would never get data
+TEST_F(DeviceCompatibilityTest, SubscribeAfterRemoteUnsubscribeSendsNewRequest)
+{
+    FakeLtPeer::Options options;
+    options.streamData = true;
+    FakeLtPeer peer(options);
+
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
+
+    auto signals = waitForSignals(device, 2, 5s);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    // the device drops the subscription on its own while it is held for takeover
+    peer.unsubscribeValueSignal();
+    std::this_thread::sleep_for(500ms);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+
+    auto reader = daq::StreamReaderBuilder()
+        .setSignal(valueSignal)
+        .setValueReadType(daq::SampleType::Float64)
+        .setDomainReadType(daq::SampleType::Int64)
+        .setSkipEvents(true)
+        .build();
+
+    std::this_thread::sleep_for(1s);
+    EXPECT_EQ(peer.subscribeRequestCount(), 2u);  // a real second subscribe request was sent
+    EXPECT_GT(reader.getAvailableCount(), 0u);    // and data flows again
 }
 
 TEST_F(DeviceCompatibilityTest, UnusedFetchSubscriptionIsReleasedBySweep)
