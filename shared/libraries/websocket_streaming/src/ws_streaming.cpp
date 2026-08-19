@@ -41,6 +41,8 @@ using namespace std::placeholders;
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 
+using FetchState = WsStreamingRemoteSignalEntry::FetchState;
+
 // Initial-fetch retry tuning, measured against a real device (burst metadata <= ~1.1 s; >= 50 ms unsub/sub gap keeps ordering).
 static constexpr unsigned INITIAL_FETCH_MAX_ATTEMPTS = 3;
 static constexpr std::chrono::milliseconds INITIAL_FETCH_TIMEOUT{1500};
@@ -158,10 +160,10 @@ void WsStreaming::subscribeRemoteSignal(const std::string& signalId)
 
         // The initial fetch still holds the wire subscription: take it over instead of sending
         // an unsubscribe/subscribe pair the device could process out of order
-        if (signalIt->second->fetchSubscriptionHeld)
+        if (signalIt->second->fetchState == FetchState::Held)
         {
             LOG_I("Found signal, taking over the initial-fetch subscription");
-            signalIt->second->fetchSubscriptionHeld = false;
+            signalIt->second->fetchState = FetchState::None;
             signalIt->second->isSubscribed = true;
             triggerSubscribeAck(signalId, true);
             return;
@@ -248,13 +250,13 @@ void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
 
     // a reused entry (a hidden domain signal the device later advertises) needs no new fetch:
     // it is already published, has its metadata, or a fetch is already in flight
-    if (entry->isPublished || entry->descriptor.assigned() || entry->initialFetchActive)
+    if (entry->isPublished || entry->descriptor.assigned() || entry->fetchState == FetchState::Fetching)
         return;
 
     // Do not immediately register the new signal with openDAQ. We need its metadata first so
     // we can make an openDAQ descriptor. Do an initial subscribe to get that metadata.
-    entry->initialFetchAttempts = 1;
-    entry->initialFetchActive = true;
+    entry->fetchState = FetchState::Fetching;
+    entry->fetchAttempts = 1;
     signal->subscribe();
 
     armInitialFetchSweep();
@@ -283,9 +285,9 @@ void WsStreaming::onInitialFetchSweep(const boost::system::error_code& ec)
         {
             // release a held initial-fetch subscription no earlier than one full sweep period
             // after publication, keeping the unsubscribe clear of application subscribes
-            if (entry->fetchSubscriptionHeld && ++entry->fetchHoldSweeps >= 2)
+            if (entry->fetchState == FetchState::Held && ++entry->sweeps >= 2)
             {
-                entry->fetchSubscriptionHeld = false;
+                entry->fetchState = FetchState::None;
                 entry->ptr->unsubscribe();
             }
             continue;
@@ -295,25 +297,26 @@ void WsStreaming::onInitialFetchSweep(const boost::system::error_code& ec)
         // grant at least one full sweep period before dropping the domain link
         if (entry->descriptor.assigned())
         {
-            if (++entry->deferredSweeps >= 2)
+            if (++entry->sweeps >= 2)
                 publishSignalEntry(entry);
             continue;
         }
 
-        if (!entry->initialFetchActive)
+        if (entry->fetchState != FetchState::Fetching)
             continue;
 
-        entry->initialFetchActive = false;
         entry->ptr->unsubscribe();
 
-        if (entry->initialFetchAttempts >= INITIAL_FETCH_MAX_ATTEMPTS)
+        if (entry->fetchAttempts >= INITIAL_FETCH_MAX_ATTEMPTS)
         {
             LOG_W("No metadata received for signal {}; giving up (without a descriptor the signal cannot be added to openDAQ)", id);
-            entry->initialFetchAttempts = 0;
+            entry->fetchState = FetchState::None;
+            entry->fetchAttempts = 0;
         }
         else
         {
-            ++entry->initialFetchAttempts;
+            entry->fetchState = FetchState::AwaitingRetry;
+            ++entry->fetchAttempts;
             retrying = true;
         }
     }
@@ -345,13 +348,11 @@ void WsStreaming::onInitialFetchResubscribe(const boost::system::error_code& ec)
 
     for (const auto& [id, entry] : signals)
     {
-        // attempts >= 2 selects signals the sweep unsubscribed (fresh are at 1, given-up at 0);
         // an assigned descriptor means metadata already arrived (entry is deferred, not lost)
-        if (entry->isPublished || entry->initialFetchActive
-                || entry->descriptor.assigned() || entry->initialFetchAttempts < 2)
+        if (entry->fetchState != FetchState::AwaitingRetry || entry->descriptor.assigned())
             continue;
 
-        entry->initialFetchActive = true;
+        entry->fetchState = FetchState::Fetching;
         entry->ptr->subscribe();
         pending = true;
     }
@@ -442,8 +443,7 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
 
 void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry)
 {
-    LOG_I("Signal {} is now ready, publishing it{}",
-        entry->ptr->id(), entry->isHiddenDomain ? " (hidden domain signal)" : "");
+    LOG_I("Signal {} is now ready, publishing it", entry->ptr->id());
 
     if (entry->domainEntry && !entry->domainEntry->isPublished)
     {
@@ -471,13 +471,16 @@ void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSign
     // keep holding the initial metadata-fetch subscription: an immediate application subscribe
     // takes it over without wire traffic (an unsubscribe/subscribe pair sent back-to-back can be
     // processed out of order by the device); the sweep releases it if no subscriber shows up
-    if (entry->initialFetchActive)
+    if (entry->fetchState == FetchState::Fetching)
     {
-        entry->initialFetchActive = false;
-        entry->fetchSubscriptionHeld = true;
+        entry->fetchState = FetchState::Held;
         armInitialFetchSweep();
     }
-    entry->initialFetchAttempts = 0;
+    else
+        entry->fetchState = FetchState::None;
+
+    entry->fetchAttempts = 0;
+    entry->sweeps = 0; // the counter now times the hold instead of the deferral
 
     // publish signals that were deferred waiting for this signal as their domain
     for (const auto& [id, dependent] : signals)
@@ -491,8 +494,8 @@ bool WsStreaming::anyInitialFetchPending() const
     // an entry with a descriptor but no publication is deferred, waiting for its domain signal;
     // a held fetch subscription awaits either an application subscribe or its sweep release
     for (const auto& [id, entry] : signals)
-        if (entry->fetchSubscriptionHeld
-                || (!entry->isPublished && (entry->initialFetchActive || entry->descriptor.assigned())))
+        if (entry->fetchState == FetchState::Held
+                || (!entry->isPublished && (entry->fetchState == FetchState::Fetching || entry->descriptor.assigned())))
             return true;
 
     return false;
@@ -543,7 +546,6 @@ std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::resolveDomainEntry(
     LOG_D("Discovered hidden domain signal {} of signal {}", domainSignalId, entry->ptr->id());
 
     auto domainEntry = createSignalEntry(domainSignal);
-    domainEntry->isHiddenDomain = true;
 
     // process its already-received metadata now so it publishes before the referencing signal
     // (if the metadata hasn't arrived yet, its later arrival publishes the entry instead)
