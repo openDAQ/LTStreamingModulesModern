@@ -59,9 +59,7 @@ class FakeLtPeer
             bool withholdTimeMetadata = false;      // announce the time signal but never send its metadata
             unsigned dropSubscribeRequests = 0;     // ignore this many leading value-signal subscribe requests
             bool streamData = false;                // stream value-signal data while it is subscribed
-            bool outOfOrderUnsubscribe = false;     // process a value-signal unsubscribe only after the next
-                                                    // request, like devices that handle near-simultaneous
-                                                    // requests out of order
+            bool outOfOrderUnsubscribe = false;     // defer a value-signal unsubscribe behind the next request
         };
 
         explicit FakeLtPeer(Options options)
@@ -193,9 +191,7 @@ class FakeLtPeer
                         return;  // simulate a dropped request: no response, no effect
                 }
 
-                // a subscribe processed while still subscribed (because the unsubscribe that
-                // should have preceded it was reordered behind it) is rejected; the deferred
-                // unsubscribe is then processed and stops the data
+                // a subscribe processed while still subscribed is rejected, then the deferred unsubscribe runs
                 if (valueSubscribed && options.outOfOrderUnsubscribe)
                 {
                     respondError(id);

@@ -158,8 +158,7 @@ void WsStreaming::subscribeRemoteSignal(const std::string& signalId)
             return;
         }
 
-        // The initial fetch still holds the wire subscription: take it over instead of sending
-        // an unsubscribe/subscribe pair the device could process out of order
+        // take over the wire subscription still held by the initial fetch: zero wire traffic
         if (signalIt->second->fetchState == FetchState::Held)
         {
             LOG_I("Found signal, taking over the initial-fetch subscription");
@@ -283,8 +282,7 @@ void WsStreaming::onInitialFetchSweep(const boost::system::error_code& ec)
     {
         if (entry->isPublished)
         {
-            // release a held initial-fetch subscription no earlier than one full sweep period
-            // after publication, keeping the unsubscribe clear of application subscribes
+            // release a held fetch subscription only after a full sweep period, clear of app subscribes
             if (entry->fetchState == FetchState::Held && ++entry->sweeps >= 2)
             {
                 entry->fetchState = FetchState::None;
@@ -468,9 +466,7 @@ void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSign
         LOG_E("Failed to register signal {} with openDAQ: {}", entry->ptr->id(), ex.what());
     }
 
-    // keep holding the initial metadata-fetch subscription: an immediate application subscribe
-    // takes it over without wire traffic (an unsubscribe/subscribe pair sent back-to-back can be
-    // processed out of order by the device); the sweep releases it if no subscriber shows up
+    // keep the fetch subscription so an immediate application subscribe can take it over
     if (entry->fetchState == FetchState::Fetching)
     {
         entry->fetchState = FetchState::Held;
@@ -491,8 +487,7 @@ void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSign
 
 bool WsStreaming::anyInitialFetchPending() const
 {
-    // an entry with a descriptor but no publication is deferred, waiting for its domain signal;
-    // a held fetch subscription awaits either an application subscribe or its sweep release
+    // deferred entries (descriptor but unpublished) and held fetch subscriptions still need the sweep
     for (const auto& [id, entry] : signals)
         if (entry->fetchState == FetchState::Held
                 || (!entry->isPublished && (entry->fetchState == FetchState::Fetching || entry->descriptor.assigned())))
