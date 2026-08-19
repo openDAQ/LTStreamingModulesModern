@@ -79,7 +79,11 @@ jobs:
           { "match-jobs": ["ubuntu-22.04-x86_64-ninja-gcc-release"],   "artifacts": [{ "name": "core-ubuntu-22.04-x86_64-ninja-gcc-release",    "dir": "staging-deps" }] },
           { "match-jobs": ["ubuntu-22.04-armv8-ninja-gcc-release"],    "artifacts": [{ "name": "core-ubuntu-22.04-armv8-ninja-gcc-release",     "dir": "staging-deps" }] },
           { "match-jobs": ["macos-26-x86_64-ninja-appleclang-release"],"artifacts": [{ "name": "core-macos-26-x86_64-ninja-appleclang-release", "dir": "staging-deps" }] },
-          { "match-jobs": ["macos-26-armv8-ninja-appleclang-release"], "artifacts": [{ "name": "core-macos-26-armv8-ninja-appleclang-release",  "dir": "staging-deps" }] }
+          { "match-jobs": ["macos-26-armv8-ninja-appleclang-release"], "artifacts": [{ "name": "core-macos-26-armv8-ninja-appleclang-release",  "dir": "staging-deps" }] },
+
+          { "match-jobs": ["ubuntu-*"],        "apt-install": ["libssl-dev"] },
+          { "match-jobs": ["manylinux*"],      "yum-install": ["openssl-devel"] },
+          { "match-jobs": ["windows-*-x86-*"], "run": "vcpkg install openssl:x86-windows; Add-Content -Path $env:GITHUB_PATH -Value C:\\vcpkg\\installed\\x86-windows\\bin -Encoding utf8" }
         ]
       cmake-presets: >-
         [
@@ -94,6 +98,10 @@ jobs:
           {
             "match-jobs": ["macos-*"],
             "cache-variables": {"CMAKE_OSX_DEPLOYMENT_TARGET": "10.15"}
+          },
+          {
+            "match-jobs": ["windows-*-x86-*"],
+            "cache-variables": {"OPENSSL_ROOT_DIR": "C:/vcpkg/installed/x86-windows"}
           }
         ]
       cpack-presets: >-
