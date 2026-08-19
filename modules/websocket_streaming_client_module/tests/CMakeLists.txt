@@ -2,7 +2,7 @@ set(MODULE_NAME ws_stream_cl_module)
 set(TEST_APP test_${MODULE_NAME})
 
 set(TEST_SOURCES test_websocket_streaming_client_module.cpp
-                 test_hidden_domain_signals.cpp
+                 test_device_compatibility.cpp
                  test_app.cpp
 )
 
