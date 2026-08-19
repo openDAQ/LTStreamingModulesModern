@@ -619,6 +619,13 @@ void WsStreaming::onRemoteSignalUnsubscribed(std::weak_ptr<WsStreamingRemoteSign
 
     LOG_I("Signal unsubscribed: {}", entry->ptr->id());
 
+    // a remote unsubscribe ends a held fetch subscription: release it so a later subscribe sends a request
+    if (entry->fetchState == FetchState::Held)
+    {
+        entry->fetchState = FetchState::None;
+        entry->ptr->unsubscribe();
+    }
+
     if (entry->isSubscribed)
     {
         entry->isSubscribed = false;
