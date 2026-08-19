@@ -4,8 +4,6 @@ on:
   push:
   schedule:
     - cron: '0 2 * * 1'
-  pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
 
 concurrency:
