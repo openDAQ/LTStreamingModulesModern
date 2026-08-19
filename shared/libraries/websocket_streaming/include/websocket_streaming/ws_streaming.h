@@ -52,8 +52,11 @@ BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
  * contrast, the WebSocket Streaming protocol only provides signal metadata after a signal has
  * been subscribed. To solve this, the streaming object does not immediately register signals with
  * openDAQ when they become available. Instead, it does an initial subscribe. When the signal's
- * metadata is received, the signal is then unsubscribed, and registered with openDAQ using
- * addToAvailableSignals() now that its metadata is known and a valid descriptor can be created.
+ * metadata is received, the signal is registered with openDAQ using addToAvailableSignals() now
+ * that its metadata is known and a valid descriptor can be created. The initial subscription is
+ * held a little longer so that an immediate application subscribe can take it over without any
+ * wire traffic (devices may process a back-to-back unsubscribe/subscribe pair out of order);
+ * if no subscriber shows up, a sweep timer releases it.
  *
  * Once registered with openDAQ, the onAddSignal() and onRemoveSignal() functions are implemented
  * to manage the subscription state of each known signal. When data is received for an active
@@ -171,7 +174,7 @@ class WsStreaming : public Streaming
         std::shared_ptr<WsStreamingRemoteSignalEntry> resolveDomainEntry(
             const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 
-        /*! @brief Registers a signal with openDAQ, releases its initial-fetch subscription and publishes signals deferred on it. */
+        /*! @brief Registers a signal with openDAQ, marks its initial-fetch subscription as held for takeover and publishes signals deferred on it. */
         void publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 
         /*! @brief Checks whether any signal is still awaiting initial metadata or deferred on an unpublished domain signal. */

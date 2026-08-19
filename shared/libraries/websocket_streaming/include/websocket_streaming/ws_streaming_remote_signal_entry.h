@@ -68,6 +68,8 @@ struct WsStreamingRemoteSignalEntry
     unsigned initialFetchAttempts = 0;  /**< Subscribe requests sent by the initial metadata fetch; 0 if never fetched or given up on. */
     bool initialFetchActive = false;    /**< An initial metadata-fetch subscription is currently active for this signal. */
     unsigned deferredSweeps = 0;        /**< Sweep passes seen while deferred on an unpublished domain signal; at 2 the signal is published without the link. */
+    bool fetchSubscriptionHeld = false; /**< The initial-fetch wire subscription is still held after publication, ready for an application subscribe to take over. */
+    unsigned fetchHoldSweeps = 0;       /**< Sweep passes seen while holding the fetch subscription; at 2 the sweep releases it. */
 };
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING

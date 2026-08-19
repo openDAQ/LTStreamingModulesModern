@@ -7,6 +7,7 @@
 - [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Defer publishing a signal until its domain signal is published, so the domain link is not lost when metadata arrives out of order; signals whose domain signal never publishes are published without the link after a timeout, with a warning.
 - [#18](https://github.com/openDAQ/LTStreamingModulesModern/pull/18) Handle subscribe/unsubscribe requests on the I/O thread to avoid a data race on the signal map.
 - [#18](https://github.com/openDAQ/LTStreamingModulesModern/pull/18) Guard signal publication so exceptions can no longer escape into the Boost.Asio I/O thread and terminate the process.
+- [#19](https://github.com/openDAQ/LTStreamingModulesModern/pull/19) Hand the initial-fetch subscription over to an application subscribing right after a signal appears, fixing signals whose data stopped after a fraction of a second (devices can process a back-to-back unsubscribe/subscribe pair out of order).
 
 ## Documenation
 

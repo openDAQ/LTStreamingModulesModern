@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -92,6 +93,12 @@ class FakeLtPeer
         {
             std::scoped_lock lock(mutex);
             return timeSubscribeRequests;
+        }
+
+        unsigned valueUnsubscribeRequestCount()
+        {
+            std::scoped_lock lock(mutex);
+            return valueUnsubscribeRequests;
         }
 
         // Advertises the previously hidden time signal in a second 'available' announcement
@@ -189,6 +196,12 @@ class FakeLtPeer
 
             else if (rpcMethod == "FAKE.unsubscribe")
             {
+                if (signalId == valueSignalId)
+                {
+                    std::scoped_lock lock(mutex);
+                    ++valueUnsubscribeRequests;
+                }
+
                 respond(id, true);
                 if (signalId == valueSignalId)
                     peer->send_metadata(valueSigno, "unsubscribe", nlohmann::json::object());
@@ -287,6 +300,7 @@ class FakeLtPeer
         std::mutex mutex;
         unsigned valueSubscribeRequests = 0;
         unsigned timeSubscribeRequests = 0;
+        unsigned valueUnsubscribeRequests = 0;
 };
 
 // An Instance owns the device so that teardown runs the device's removal path;
@@ -418,6 +432,58 @@ TEST_F(HiddenDomainSignalsTest, ReadvertisedHiddenDomainSignalStartsNoNewFetch)
     ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
 
     ASSERT_EQ(peer.timeSubscribeRequestCount(), 0u);
+}
+
+TEST_F(HiddenDomainSignalsTest, ImmediateSubscribeTakesOverFetchSubscription)
+{
+    FakeLtPeer peer({});
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
+
+    auto signals = waitForSignals(device, 2, 5s);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+
+    // subscribe immediately after the signal appeared, like an auto-subscribing application
+    auto mirrored = valueSignal.asPtr<IMirroredSignalConfig>();
+    std::promise<void> ackPromise;
+    auto ackFuture = ackPromise.get_future();
+    mirrored.getOnSubscribeComplete() +=
+        [&ackPromise](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr&) { ackPromise.set_value(); };
+
+    auto reader = daq::StreamReaderBuilder()
+        .setSignal(valueSignal)
+        .setValueReadType(daq::SampleType::Float64)
+        .setDomainReadType(daq::SampleType::Int64)
+        .setSkipEvents(true)
+        .build();
+
+    // the takeover must acknowledge the subscription without any wire traffic
+    ASSERT_EQ(ackFuture.wait_for(3s), std::future_status::ready);
+
+    // give the sweep time to have (wrongly) released the fetch subscription
+    std::this_thread::sleep_for(4s);
+
+    EXPECT_EQ(peer.subscribeRequestCount(), 1u);         // only the initial fetch subscribed
+    EXPECT_EQ(peer.valueUnsubscribeRequestCount(), 0u);  // never released: taken over
+}
+
+TEST_F(HiddenDomainSignalsTest, UnusedFetchSubscriptionIsReleasedBySweep)
+{
+    FakeLtPeer peer({});
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
+
+    auto signals = waitForSignals(device, 2, 5s);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    // nobody subscribes: the sweep must release the held fetch subscription
+    std::this_thread::sleep_for(4s);
+
+    EXPECT_EQ(peer.subscribeRequestCount(), 1u);
+    EXPECT_EQ(peer.valueUnsubscribeRequestCount(), 1u);
 }
 
 TEST_F(HiddenDomainSignalsTest, SignalPublishesWithoutDomainWhenMetadataNeverArrives)
