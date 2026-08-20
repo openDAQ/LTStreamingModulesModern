@@ -369,6 +369,9 @@ void WsStreaming::subscribeRemoteSignal(const std::string& signalId)
             signalIt->second->fetchState = FetchState::None;
             signalIt->second->isSubscribed = true;
             triggerSubscribeAck(signalId, true);
+
+            if (signalIt->second->descriptor.assigned())
+                emitDescriptorChangedEvents(signalIt->second);
             return;
         }
 
@@ -612,20 +615,7 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
     }
 
     if (entry->descriptor.assigned() && entry->isPublished)
-    {
-        auto packet = DataDescriptorChangedEventPacket(entry->descriptor, nullptr);
-        onPacket(entry->ptr->id(), packet);
-
-        // propagate to signals that use this signal as their domain
-        packet = DataDescriptorChangedEventPacket(nullptr, entry->descriptor);
-        for (const auto& [id, dataSignalEntry] : signals)
-        {
-            if (dataSignalEntry != entry &&
-                dataSignalEntry->domainEntry == entry &&
-                dataSignalEntry->isPublished)
-                onPacket(dataSignalEntry->ptr->id(), packet);
-        }
-    }
+        emitDescriptorChangedEvents(entry);
     if (entry->descriptor.assigned() && !entry->isPublished)
     {
         // defer until the domain publishes: publishSignalEntry() then publishes this signal too;
@@ -640,6 +630,22 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
         {
             publishSignalEntry(entry);
         }
+    }
+}
+
+void WsStreaming::emitDescriptorChangedEvents(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry)
+{
+    auto packet = DataDescriptorChangedEventPacket(entry->descriptor, nullptr);
+    onPacket(entry->ptr->id(), packet);
+
+    // propagate to signals that use this signal as their domain
+    packet = DataDescriptorChangedEventPacket(nullptr, entry->descriptor);
+    for (const auto& [id, dataSignalEntry] : signals)
+    {
+        if (dataSignalEntry != entry &&
+            dataSignalEntry->domainEntry == entry &&
+            dataSignalEntry->isPublished)
+            onPacket(dataSignalEntry->ptr->id(), packet);
     }
 }
 

@@ -53,7 +53,8 @@ BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
  * their metadata, and registered via addToAvailableSignals() once a descriptor can be built.
  * The fetch subscription is briefly kept afterwards so an immediate application subscribe can
  * take it over without wire traffic (devices may process a back-to-back unsubscribe/subscribe
- * pair out of order); a sweep timer releases it if unused.
+ * pair out of order); a sweep timer releases it if unused. A takeover replays the cached
+ * descriptor to openDAQ.
  *
  * Once registered with openDAQ, the onAddSignal() and onRemoveSignal() functions are implemented
  * to manage the subscription state of each known signal. When data is received for an active
@@ -185,6 +186,9 @@ class WsStreaming : public Streaming
 
         /*! @brief Registers a signal with openDAQ, marks its initial-fetch subscription as held for takeover and publishes signals deferred on it. */
         void publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
+
+        /*! @brief Pushes the entry's cached descriptor into openDAQ as descriptor-changed events, propagating to signals that use it as their domain. */
+        void emitDescriptorChangedEvents(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 
         /*! @brief Checks whether any signal is still awaiting initial metadata or deferred on an unpublished domain signal. */
         bool anyInitialFetchPending() const;
