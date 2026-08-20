@@ -60,6 +60,9 @@ class FakeLtPeer
             unsigned dropSubscribeRequests = 0;     // ignore this many leading value-signal subscribe requests
             bool streamData = false;                // stream value-signal data while it is subscribed
             bool outOfOrderUnsubscribe = false;     // defer a value-signal unsubscribe behind the next request
+            std::chrono::milliseconds unsubscribeDelay{0};  // time the device takes to process a value unsubscribe
+            std::chrono::milliseconds subscribeAfterUnsubscribeGuard{0};  // ignore a subscribe arriving this soon after an unsubscribe
+            bool answerTimeSubscribe = false;       // answer a time-signal subscribe, but do not re-announce it
         };
 
         explicit FakeLtPeer(Options options)
@@ -68,6 +71,7 @@ class FakeLtPeer
                 boost::asio::ip::make_address("127.0.0.1"), 0))
             , timer(ioc)
             , dataTimer(ioc)
+            , unsubTimer(ioc)
         {
             acceptor.async_accept(
                 [this](const boost::system::error_code& ec, boost::asio::ip::tcp::socket socket)
@@ -102,10 +106,29 @@ class FakeLtPeer
             return timeSubscribeRequests;
         }
 
+        struct Request
+        {
+            std::string method;
+            std::string signalId;
+            std::chrono::steady_clock::time_point at;
+        };
+
+        std::vector<Request> requestLog()
+        {
+            std::scoped_lock lock(mutex);
+            return requests;
+        }
+
         unsigned valueUnsubscribeRequestCount()
         {
             std::scoped_lock lock(mutex);
             return valueUnsubscribeRequests;
+        }
+
+        // Makes the device take a while to process a value unsubscribe from now on
+        void setUnsubscribeDelay(std::chrono::milliseconds delay)
+        {
+            boost::asio::post(ioc, [this, delay] { options.unsubscribeDelay = delay; });
         }
 
         // Unilaterally ends the value-signal subscription, like a device dropping it on its own
@@ -195,6 +218,11 @@ class FakeLtPeer
                     && !params["params"].empty() && params["params"][0].is_string())
                 signalId = params["params"][0];
 
+            {
+                std::scoped_lock lock(mutex);
+                requests.push_back({rpcMethod, signalId, std::chrono::steady_clock::now()});
+            }
+
             if (rpcMethod == "FAKE.subscribe" && signalId == valueSignalId)
             {
                 {
@@ -203,6 +231,14 @@ class FakeLtPeer
                     if (valueSubscribeRequests <= options.dropSubscribeRequests)
                         return;  // simulate a dropped request: no response, no effect
                 }
+
+                // a device that discards a subscribe arriving on top of an unsubscribe it is
+                // still processing, which is what makes a back-to-back pair unsafe
+                if (options.subscribeAfterUnsubscribeGuard.count() > 0
+                        && lastValueUnsubscribe != std::chrono::steady_clock::time_point{}
+                        && std::chrono::steady_clock::now() - lastValueUnsubscribe
+                            < options.subscribeAfterUnsubscribeGuard)
+                    return;
 
                 // a subscribe processed while still subscribed is rejected, then the deferred unsubscribe runs
                 if (valueSubscribed && options.outOfOrderUnsubscribe)
@@ -222,8 +258,15 @@ class FakeLtPeer
 
             else if (rpcMethod == "FAKE.subscribe" && signalId == timeSignalId)
             {
-                std::scoped_lock lock(mutex);
-                ++timeSubscribeRequests;
+                {
+                    std::scoped_lock lock(mutex);
+                    ++timeSubscribeRequests;
+                }
+
+                // the device already streams this signal, so it acknowledges the request but sends
+                // no new "subscribe" metadata for it
+                if (options.answerTimeSubscribe)
+                    respond(id, true);
             }
 
             else if (rpcMethod == "FAKE.unsubscribe")
@@ -231,9 +274,25 @@ class FakeLtPeer
                 if (signalId == valueSignalId)
                 {
                     if (options.outOfOrderUnsubscribe)
+                    {
                         pendingValueUnsubscribeId = id;  // sit on it until the next request
+                    }
+                    else if (options.unsubscribeDelay.count() > 0)
+                    {
+                        // a device that does not answer instantly: over an HTTP command interface
+                        // every request travels on its own TCP connection
+                        unsubTimer.expires_after(options.unsubscribeDelay);
+                        unsubTimer.async_wait(
+                            [this, id](const boost::system::error_code& ec)
+                            {
+                                if (!ec)
+                                    executeValueUnsubscribe(id);
+                            });
+                    }
                     else
+                    {
                         executeValueUnsubscribe(id);
+                    }
                     return;
                 }
 
@@ -247,6 +306,8 @@ class FakeLtPeer
                 std::scoped_lock lock(mutex);
                 ++valueUnsubscribeRequests;
             }
+
+            lastValueUnsubscribe = std::chrono::steady_clock::now();
 
             valueSubscribed = false;
             respond(id, true);
@@ -379,6 +440,7 @@ class FakeLtPeer
         boost::asio::ip::tcp::acceptor acceptor;
         boost::asio::steady_timer timer;
         boost::asio::steady_timer dataTimer;
+        boost::asio::steady_timer unsubTimer;
         std::thread thread;
 
         // sent by reference from the asynchronous send_data(), so they must outlive the calls
@@ -386,6 +448,7 @@ class FakeLtPeer
         const std::vector<float> valueSamples = std::vector<float>(100, 1.0f);
 
         bool valueSubscribed = false;  // only touched on the ioc thread
+        std::chrono::steady_clock::time_point lastValueUnsubscribe;  // only touched on the ioc thread
         std::optional<nlohmann::json> pendingValueUnsubscribeId;
 
         std::shared_ptr<wss::detail::peer> peer;
@@ -395,6 +458,7 @@ class FakeLtPeer
         unsigned valueSubscribeRequests = 0;
         unsigned timeSubscribeRequests = 0;
         unsigned valueUnsubscribeRequests = 0;
+        std::vector<Request> requests;
 };
 
 // An Instance owns the device so that teardown runs the device's removal path;
@@ -472,6 +536,36 @@ auto buildStreamReader(const SignalPtr& signal)
         .setDomainReadType(daq::SampleType::Int64)
         .setSkipEvents(true)
         .build();
+}
+
+// The client must never put an unsubscribe and a subscribe for the same signal on the wire close
+// together: a device is free to execute near-simultaneous requests in either order, and the result
+// of a command-interface call is never inspected, so a rejection would go unnoticed.
+::testing::AssertionResult noSubscribeRacesAnUnsubscribe(
+    const std::vector<FakeLtPeer::Request>& log,
+    std::chrono::milliseconds window)
+{
+    for (size_t i = 0; i < log.size(); ++i)
+    {
+        if (log[i].method != "FAKE.unsubscribe")
+            continue;
+
+        for (size_t j = i + 1; j < log.size(); ++j)
+        {
+            if (log[j].signalId != log[i].signalId || log[j].method != "FAKE.subscribe")
+                continue;
+
+            auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(log[j].at - log[i].at);
+            if (gap >= window)
+                break;
+
+            return ::testing::AssertionFailure()
+                << "subscribe for " << log[j].signalId << " was sent " << gap.count()
+                << " ms after an unsubscribe for the same signal";
+        }
+    }
+
+    return ::testing::AssertionSuccess();
 }
 
 }  // namespace
@@ -659,4 +753,121 @@ TEST_F(DeviceCompatibilityTest, SignalPublishesWithoutDomainWhenMetadataNeverArr
     auto valueSignal = findSignalByName(signals, "CH1.value");
     ASSERT_TRUE(valueSignal.assigned());
     ASSERT_FALSE(valueSignal.getDomainSignal().assigned());
+}
+
+
+/*
+ * Not covered by the fetch-subscription handover: an application drops its subscription and takes
+ * it again before the device has answered the unsubscribe. unsubscribeRemoteSignal() only clears
+ * isSubscribed when the acknowledgement arrives, so the subscribe in between is rejected by the
+ * module itself and lost for good - openDAQ has already counted the subscriber and never asks again.
+ */
+TEST_F(DeviceCompatibilityTest, ResubscribeWhileUnsubscribeIsPendingKeepsData)
+{
+    FakeLtPeer::Options options;
+    options.streamData = true;
+    FakeLtPeer peer(options);
+
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+
+    auto reader = buildStreamReader(valueSignal);
+    std::this_thread::sleep_for(500ms);
+    ASSERT_GT(reader.getAvailableCount(), 0u);
+
+    // from now on the device needs a moment to process an unsubscribe
+    peer.setUnsubscribeDelay(200ms);
+
+    // a display is closed and reopened: unsubscribe, then subscribe again right away
+    reader.release();
+    auto reader2 = buildStreamReader(valueSignal);
+
+    // wait past the acknowledgement and discard what arrived before it: the failure mode delivers
+    // that burst and only then goes silent
+    std::this_thread::sleep_for(1s);
+    if (SizeT count = reader2.getAvailableCount(); count > 0)
+    {
+        std::vector<double> values(count);
+        std::vector<std::int64_t> domain(count);
+        reader2.readWithDomain(values.data(), domain.data(), &count);
+    }
+
+    std::this_thread::sleep_for(500ms);
+    EXPECT_GT(reader2.getAvailableCount(), 0u);
+}
+
+
+/*
+ * The client still emits a back-to-back unsubscribe/subscribe pair on
+ * the metadata-fetch retry path, and can emit one when the sweep releases a held subscription just
+ * as an application subscribes. The retry path makes the pair deterministic, so it is the one
+ * asserted here; both are the same invariant.
+ */
+TEST_F(DeviceCompatibilityTest, NoSubscribeIsSentRightAfterAnUnsubscribe)
+{
+    FakeLtPeer::Options options;
+    options.dropSubscribeRequests = 1;  // force the retry path
+
+    FakeLtPeer peer(options);
+
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 2, 10s);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    EXPECT_TRUE(noSubscribeRacesAnUnsubscribe(peer.requestLog(), 250ms));
+}
+
+// The behavioural consequence: a device that discards a subscribe arriving on top of an unsubscribe
+// it is still processing defeats the retry entirely, and the signal never appears.
+TEST_F(DeviceCompatibilityTest, RetryConvergesOnADeviceThatDiscardsRacingSubscribes)
+{
+    FakeLtPeer::Options options;
+    options.dropSubscribeRequests = 1;
+    options.subscribeAfterUnsubscribeGuard = 250ms;
+
+    FakeLtPeer peer(options);
+
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 2, 10s);
+    EXPECT_EQ(signals.getCount(), 2u)
+        << "the signal never appeared: every retry subscribe was discarded because it followed the "
+           "unsubscribe too closely; subscribe requests seen by the device: "
+        << peer.subscribeRequestCount();
+}
+
+/*
+ * A device is not obliged to re-announce a subscription it already considers
+ * active. The hidden time signal is such a case - the device started streaming it together with the
+ * value signal - so a subscribe for it is acknowledged over the command interface but produces no
+ * new "subscribe" metadata, and openDAQ is never told the subscription completed.
+ */
+TEST_F(DeviceCompatibilityTest, SubscribeIsAcknowledgedWhenTheDeviceAlreadyStreamsTheSignal)
+{
+    FakeLtPeer::Options options;
+    options.answerTimeSubscribe = true;
+
+    FakeLtPeer peer(options);
+
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto timeSignal = findSignalByName(signals, "CH1.time");
+    ASSERT_TRUE(timeSignal.assigned());
+
+    auto mirrored = timeSignal.asPtr<IMirroredSignalConfig>();
+    std::promise<void> ackPromise;
+    auto ackFuture = ackPromise.get_future();
+    mirrored.getOnSubscribeComplete() +=
+        [&ackPromise](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr&) { ackPromise.set_value(); };
+
+    auto port = InputPort(instance.getContext(), nullptr, "ip");
+    port.connect(timeSignal);
+
+    EXPECT_TRUE(ackFuture.wait_for(3s) == std::future_status::ready)
+        << "openDAQ was never told the subscription completed, although the device acknowledged the "
+           "request and is streaming the signal; subscribe requests for the time signal: "
+        << peer.timeSubscribeRequestCount();
+
+    port.disconnect();
 }
