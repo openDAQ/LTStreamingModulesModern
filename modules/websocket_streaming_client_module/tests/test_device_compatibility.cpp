@@ -1,7 +1,7 @@
 ﻿/*
  * End-to-end tests for the streaming client against a fake LT peer that mimics devices which
  * do not advertise their time signals ("hidden" domain signals referenced via "relatedSignals"
- * with an abstract table id) and which may drop command-interface requests.
+ * with an abstract table id) and which may drop or reorder command-interface requests.
  *
  * The fake peer accepts a WebSocket upgrade on a raw TCP socket (the client only checks the
  * HTTP status line) and then speaks the LT streaming protocol through the ws-streaming
@@ -10,12 +10,16 @@
  */
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -28,6 +32,7 @@
 #include <nlohmann/json.hpp>
 
 #include <ws-streaming/detail/peer.hpp>
+#include <ws-streaming/detail/streaming_protocol.hpp>
 
 #include <testutils/testutils.h>
 #include <websocket_streaming_client_module/module_dll.h>
@@ -53,6 +58,8 @@ class FakeLtPeer
             std::chrono::milliseconds timeMetadataDelay{0};  // extra delay before the time signal's metadata
             bool withholdTimeMetadata = false;      // announce the time signal but never send its metadata
             unsigned dropSubscribeRequests = 0;     // ignore this many leading value-signal subscribe requests
+            bool streamData = false;                // stream value-signal data while it is subscribed
+            bool outOfOrderUnsubscribe = false;     // defer a value-signal unsubscribe behind the next request
         };
 
         explicit FakeLtPeer(Options options)
@@ -60,6 +67,7 @@ class FakeLtPeer
             , acceptor(ioc, boost::asio::ip::tcp::endpoint(
                 boost::asio::ip::make_address("127.0.0.1"), 0))
             , timer(ioc)
+            , dataTimer(ioc)
         {
             acceptor.async_accept(
                 [this](const boost::system::error_code& ec, boost::asio::ip::tcp::socket socket)
@@ -92,6 +100,25 @@ class FakeLtPeer
         {
             std::scoped_lock lock(mutex);
             return timeSubscribeRequests;
+        }
+
+        unsigned valueUnsubscribeRequestCount()
+        {
+            std::scoped_lock lock(mutex);
+            return valueUnsubscribeRequests;
+        }
+
+        // Unilaterally ends the value-signal subscription, like a device dropping it on its own
+        void unsubscribeValueSignal()
+        {
+            boost::asio::post(ioc,
+                [this]
+                {
+                    if (!peer)
+                        return;
+                    valueSubscribed = false;
+                    peer->send_metadata(valueSigno, "unsubscribe", nlohmann::json::object());
+                });
         }
 
         // Advertises the previously hidden time signal in a second 'available' announcement
@@ -177,8 +204,20 @@ class FakeLtPeer
                         return;  // simulate a dropped request: no response, no effect
                 }
 
+                // a subscribe processed while still subscribed is rejected, then the deferred unsubscribe runs
+                if (valueSubscribed && options.outOfOrderUnsubscribe)
+                {
+                    respondError(id);
+                    flushPendingValueUnsubscribe();
+                    return;
+                }
+
+                valueSubscribed = true;
                 respond(id, true);
                 sendValueSignalFamily();
+
+                if (options.streamData)
+                    startStreamingData();
             }
 
             else if (rpcMethod == "FAKE.subscribe" && signalId == timeSignalId)
@@ -189,10 +228,38 @@ class FakeLtPeer
 
             else if (rpcMethod == "FAKE.unsubscribe")
             {
-                respond(id, true);
                 if (signalId == valueSignalId)
-                    peer->send_metadata(valueSigno, "unsubscribe", nlohmann::json::object());
+                {
+                    if (options.outOfOrderUnsubscribe)
+                        pendingValueUnsubscribeId = id;  // sit on it until the next request
+                    else
+                        executeValueUnsubscribe(id);
+                    return;
+                }
+
+                respond(id, true);
             }
+        }
+
+        void executeValueUnsubscribe(const nlohmann::json& id)
+        {
+            {
+                std::scoped_lock lock(mutex);
+                ++valueUnsubscribeRequests;
+            }
+
+            valueSubscribed = false;
+            respond(id, true);
+            peer->send_metadata(valueSigno, "unsubscribe", nlohmann::json::object());
+        }
+
+        void flushPendingValueUnsubscribe()
+        {
+            if (!pendingValueUnsubscribeId)
+                return;
+
+            executeValueUnsubscribe(*pendingValueUnsubscribeId);
+            pendingValueUnsubscribeId.reset();
         }
 
         void respond(const nlohmann::json& id, bool result)
@@ -202,6 +269,38 @@ class FakeLtPeer
                 { "id", id },
                 { "result", result },
             });
+        }
+
+        void respondError(const nlohmann::json& id)
+        {
+            peer->send_metadata(0, "response", {
+                { "jsonrpc", "2.0" },
+                { "id", id },
+                { "error", { { "code", -32602 }, { "message", "already subscribed" } } },
+            });
+        }
+
+        void startStreamingData()
+        {
+            // give the linear time table its start point, then pump value samples periodically
+            peer->send_data(timeSigno, boost::asio::buffer(&timeStart, sizeof(timeStart)));
+            sendValueData();
+        }
+
+        void sendValueData()
+        {
+            if (!valueSubscribed)
+                return;
+
+            peer->send_data(valueSigno, boost::asio::buffer(valueSamples));
+
+            dataTimer.expires_after(20ms);
+            dataTimer.async_wait(
+                [this](const boost::system::error_code& ec)
+                {
+                    if (!ec)
+                        sendValueData();
+                });
         }
 
         void sendValueSignalFamily()
@@ -279,7 +378,15 @@ class FakeLtPeer
         boost::asio::io_context ioc{1};
         boost::asio::ip::tcp::acceptor acceptor;
         boost::asio::steady_timer timer;
+        boost::asio::steady_timer dataTimer;
         std::thread thread;
+
+        // sent by reference from the asynchronous send_data(), so they must outlive the calls
+        const wss::detail::streaming_protocol::linear_payload timeStart{0, 0};
+        const std::vector<float> valueSamples = std::vector<float>(100, 1.0f);
+
+        bool valueSubscribed = false;  // only touched on the ioc thread
+        std::optional<nlohmann::json> pendingValueUnsubscribeId;
 
         std::shared_ptr<wss::detail::peer> peer;
         boost::signals2::scoped_connection onMetadata;
@@ -287,6 +394,7 @@ class FakeLtPeer
         std::mutex mutex;
         unsigned valueSubscribeRequests = 0;
         unsigned timeSubscribeRequests = 0;
+        unsigned valueUnsubscribeRequests = 0;
 };
 
 // An Instance owns the device so that teardown runs the device's removal path;
@@ -335,17 +443,45 @@ SignalPtr findSignalByName(const ListPtr<ISignal>& signals, const std::string& n
     return nullptr;
 }
 
+// Bundles the connected client so tests keep the owning Instance alive
+struct ClientSetup
+{
+    InstancePtr instance;
+    DevicePtr device;
+    ListPtr<ISignal> signals;
+};
+
+ClientSetup connectAndWaitForSignals(
+    const FakeLtPeer& peer,
+    size_t expectedCount = 2,
+    std::chrono::milliseconds timeout = 5s)
+{
+    ClientSetup setup;
+    setup.instance = createClientInstance();
+    setup.device = connectDevice(setup.instance, peer.port());
+    setup.signals = waitForSignals(setup.device, expectedCount, timeout);
+    return setup;
+}
+
+// Builds a Float64/Int64 stream reader on the signal, subscribing it
+auto buildStreamReader(const SignalPtr& signal)
+{
+    return daq::StreamReaderBuilder()
+        .setSignal(signal)
+        .setValueReadType(daq::SampleType::Float64)
+        .setDomainReadType(daq::SampleType::Int64)
+        .setSkipEvents(true)
+        .build();
+}
+
 }  // namespace
 
-using HiddenDomainSignalsTest = testing::Test;
+using DeviceCompatibilityTest = testing::Test;
 
-TEST_F(HiddenDomainSignalsTest, HiddenDomainSignalIsLinked)
+TEST_F(DeviceCompatibilityTest, HiddenDomainSignalIsLinked)
 {
     FakeLtPeer peer({});
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
-
-    auto signals = waitForSignals(device, 2, 5s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
 
     auto valueSignal = findSignalByName(signals, "CH1.value");
@@ -357,17 +493,14 @@ TEST_F(HiddenDomainSignalsTest, HiddenDomainSignalIsLinked)
     ASSERT_EQ(valueSignal.getDomainSignal(), timeSignal);
 }
 
-TEST_F(HiddenDomainSignalsTest, DomainMetadataArrivingLateIsStillLinked)
+TEST_F(DeviceCompatibilityTest, DomainMetadataArrivingLateIsStillLinked)
 {
     FakeLtPeer::Options options;
     options.timeMetadataBeforeValue = false;
     options.timeMetadataDelay = 300ms;
 
     FakeLtPeer peer(options);
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
-
-    auto signals = waitForSignals(device, 2, 5s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
 
     auto valueSignal = findSignalByName(signals, "CH1.value");
@@ -377,17 +510,15 @@ TEST_F(HiddenDomainSignalsTest, DomainMetadataArrivingLateIsStillLinked)
     ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
 }
 
-TEST_F(HiddenDomainSignalsTest, DroppedSubscribeRequestIsRetried)
+TEST_F(DeviceCompatibilityTest, DroppedSubscribeRequestIsRetried)
 {
     FakeLtPeer::Options options;
     options.dropSubscribeRequests = 1;
 
     FakeLtPeer peer(options);
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
 
     // the sweep timer retries after 1.5 s + 100 ms; allow generous margin
-    auto signals = waitForSignals(device, 2, 10s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 2, 10s);
     ASSERT_EQ(signals.getCount(), 2u);
     ASSERT_GE(peer.subscribeRequestCount(), 2u);
 
@@ -396,13 +527,10 @@ TEST_F(HiddenDomainSignalsTest, DroppedSubscribeRequestIsRetried)
     ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
 }
 
-TEST_F(HiddenDomainSignalsTest, ReadvertisedHiddenDomainSignalStartsNoNewFetch)
+TEST_F(DeviceCompatibilityTest, ReadvertisedHiddenDomainSignalStartsNoNewFetch)
 {
     FakeLtPeer peer({});
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
-
-    auto signals = waitForSignals(device, 2, 5s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
 
     // the device now advertises the already-published hidden time signal
@@ -420,18 +548,112 @@ TEST_F(HiddenDomainSignalsTest, ReadvertisedHiddenDomainSignalStartsNoNewFetch)
     ASSERT_EQ(peer.timeSubscribeRequestCount(), 0u);
 }
 
-TEST_F(HiddenDomainSignalsTest, SignalPublishesWithoutDomainWhenMetadataNeverArrives)
+TEST_F(DeviceCompatibilityTest, ImmediateSubscribeTakesOverFetchSubscription)
+{
+    FakeLtPeer peer({});
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+
+    // subscribe immediately after the signal appeared, like an auto-subscribing application
+    auto mirrored = valueSignal.asPtr<IMirroredSignalConfig>();
+    std::promise<void> ackPromise;
+    auto ackFuture = ackPromise.get_future();
+    mirrored.getOnSubscribeComplete() +=
+        [&ackPromise](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr&) { ackPromise.set_value(); };
+
+    auto reader = buildStreamReader(valueSignal);
+
+    // the takeover must acknowledge the subscription without any wire traffic
+    ASSERT_EQ(ackFuture.wait_for(3s), std::future_status::ready);
+
+    // give the sweep time to have (wrongly) released the fetch subscription
+    std::this_thread::sleep_for(4s);
+
+    EXPECT_EQ(peer.subscribeRequestCount(), 1u);         // only the initial fetch subscribed
+    EXPECT_EQ(peer.valueUnsubscribeRequestCount(), 0u);  // never released: taken over
+}
+
+// Without the takeover, a device swapping the release unsubscribe with the app subscribe stops the data
+TEST_F(DeviceCompatibilityTest, DataKeepsFlowingWhenDeviceReordersUnsubscribeAndSubscribe)
+{
+    FakeLtPeer::Options options;
+    options.streamData = true;
+    options.outOfOrderUnsubscribe = true;
+    FakeLtPeer peer(options);
+
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+
+    // subscribe immediately after the signal appeared, like an auto-subscribing application
+    auto reader = buildStreamReader(valueSignal);
+
+    // wait past the sweep window and discard the startup burst (the failure mode goes silent after it)
+    std::this_thread::sleep_for(4s);
+
+    if (SizeT count = reader.getAvailableCount(); count > 0)
+    {
+        std::vector<double> values(count);
+        std::vector<std::int64_t> domain(count);
+        reader.readWithDomain(values.data(), domain.data(), &count);
+    }
+
+    std::this_thread::sleep_for(500ms);
+    EXPECT_GT(reader.getAvailableCount(), 0u);
+}
+
+// A remote unsubscribe must end the held fetch subscription; a takeover of it would never get data
+TEST_F(DeviceCompatibilityTest, SubscribeAfterRemoteUnsubscribeSendsNewRequest)
+{
+    FakeLtPeer::Options options;
+    options.streamData = true;
+    FakeLtPeer peer(options);
+
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    // the device drops the subscription on its own while it is held for takeover
+    peer.unsubscribeValueSignal();
+    std::this_thread::sleep_for(500ms);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+
+    auto reader = buildStreamReader(valueSignal);
+
+    std::this_thread::sleep_for(1s);
+    EXPECT_EQ(peer.subscribeRequestCount(), 2u);  // a real second subscribe request was sent
+    EXPECT_GT(reader.getAvailableCount(), 0u);    // and data flows again
+}
+
+TEST_F(DeviceCompatibilityTest, UnusedFetchSubscriptionIsReleasedBySweep)
+{
+    FakeLtPeer peer({});
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    // nobody subscribes: the sweep must release the held fetch subscription
+    std::this_thread::sleep_for(4s);
+
+    EXPECT_EQ(peer.subscribeRequestCount(), 1u);
+    EXPECT_EQ(peer.valueUnsubscribeRequestCount(), 1u);
+}
+
+TEST_F(DeviceCompatibilityTest, SignalPublishesWithoutDomainWhenMetadataNeverArrives)
 {
     FakeLtPeer::Options options;
     options.timeMetadataBeforeValue = false;
     options.withholdTimeMetadata = true;
 
     FakeLtPeer peer(options);
-    auto instance = createClientInstance();
-    auto device = connectDevice(instance, peer.port());
 
     // deferral gives up after two sweep periods (~3 s); allow generous margin
-    auto signals = waitForSignals(device, 1, 10s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 1, 10s);
     ASSERT_EQ(signals.getCount(), 1u);
 
     auto valueSignal = findSignalByName(signals, "CH1.value");

@@ -48,12 +48,12 @@ BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
  * This object uses the ws-streaming library to establish a WebSocket streaming connection to a
  * remote peer.
  *
- * openDAQ requires signal objects to have a valid descriptor, even if they are not connected. In
- * contrast, the WebSocket Streaming protocol only provides signal metadata after a signal has
- * been subscribed. To solve this, the streaming object does not immediately register signals with
- * openDAQ when they become available. Instead, it does an initial subscribe. When the signal's
- * metadata is received, the signal is then unsubscribed, and registered with openDAQ using
- * addToAvailableSignals() now that its metadata is known and a valid descriptor can be created.
+ * openDAQ signals need a valid descriptor, but the WebSocket Streaming protocol only provides
+ * metadata once a signal is subscribed. New signals are therefore first subscribed to fetch
+ * their metadata, and registered via addToAvailableSignals() once a descriptor can be built.
+ * The fetch subscription is briefly kept afterwards so an immediate application subscribe can
+ * take it over without wire traffic (devices may process a back-to-back unsubscribe/subscribe
+ * pair out of order); a sweep timer releases it if unused.
  *
  * Once registered with openDAQ, the onAddSignal() and onRemoveSignal() functions are implemented
  * to manage the subscription state of each known signal. When data is received for an active
@@ -171,7 +171,7 @@ class WsStreaming : public Streaming
         std::shared_ptr<WsStreamingRemoteSignalEntry> resolveDomainEntry(
             const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 
-        /*! @brief Registers a signal with openDAQ, releases its initial-fetch subscription and publishes signals deferred on it. */
+        /*! @brief Registers a signal with openDAQ, marks its initial-fetch subscription as held for takeover and publishes signals deferred on it. */
         void publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 
         /*! @brief Checks whether any signal is still awaiting initial metadata or deferred on an unpublished domain signal. */
