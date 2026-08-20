@@ -2,9 +2,19 @@
 
 ## Bug fixes
 
+- [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Resolve hidden domain (time) signals referenced via the `relatedSignals` metadata element, fixing devices that connected successfully but delivered no data (signals had no domain signal).
+- [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Retry initial metadata-fetch subscribes via a sweep timer, fixing signals that silently never appeared on devices that drop concurrent command-interface requests.
+- [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Defer publishing a signal until its domain signal is published, so the domain link is not lost when metadata arrives out of order; signals whose domain signal never publishes are published without the link after a timeout, with a warning.
+- [#18](https://github.com/openDAQ/LTStreamingModulesModern/pull/18) Handle subscribe/unsubscribe requests on the I/O thread to avoid a data race on the signal map.
+- [#18](https://github.com/openDAQ/LTStreamingModulesModern/pull/18) Guard signal publication so exceptions can no longer escape into the Boost.Asio I/O thread and terminate the process.
+- [#19](https://github.com/openDAQ/LTStreamingModulesModern/pull/19) Hand the initial-fetch subscription over to an immediately subscribing application, fixing data that stopped on devices that reorder back-to-back unsubscribe/subscribe pairs.
+
 ## Documenation
 
 ## Misc
 
-- [#2](https://github.com/openDAQ/LTStreamingModulesModern/pull/2) Import files from openDAQ SDK
+- [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Bump ws-streaming to v3.1.1, fixing warnings-as-errors builds (GCC `-Werror=reorder`, MSVC `/WX` C5038).
+
 - [#1](https://github.com/openDAQ/LTStreamingModulesModern/pull/1) Project initial version.
+- [#2](https://github.com/openDAQ/LTStreamingModulesModern/pull/2) Import files from openDAQ SDK
+- [#8](https://github.com/openDAQ/LTStreamingModulesModern/pull/8) Bumped to 4.0.0 — major version raised to reflect the module's move to a standalone release cycle, decoupled from openDAQ core versioning.
