@@ -50,6 +50,14 @@ private:
         std::string path;
     };
 
+    // Pick the plain or the secure variant according to the connection string. The daq.lts://
+    // counterparts only exist in a build with the TLS channel, so these keep the preprocessor
+    // out of onCreateDevice() and onCreateStreaming().
+    static PropertyObjectPtr createDefaultDeviceConfig(const StringPtr& connectionString);
+    static PropertyObjectPtr createDefaultStreamingConfig(const StringPtr& connectionString);
+    static DeviceTypePtr createDeviceType(const StringPtr& connectionString);
+    static StreamingTypePtr createStreamingType(const StringPtr& connectionString);
+
     DAQ_WS_STREAM_CL_MODULE_API static StringPtr createUrlConnectionString(bool secureType,
                                                                            const StringPtr& host,
                                                                            const IntegerPtr& port,
@@ -60,6 +68,7 @@ private:
     DAQ_WS_STREAM_CL_MODULE_API static StringPtr formNewStyleConnectionString(const StringPtr& connectionString);
     DAQ_WS_STREAM_CL_MODULE_API static DeviceInfoPtr populateDiscoveredDevice(const discovery::MdnsDiscoveredDevice& discoveredDevice);
     DAQ_WS_STREAM_CL_MODULE_API static bool isSecureConnection(const std::string& connectionString);
+    DAQ_WS_STREAM_CL_MODULE_API static bool isSupportedServiceName(const std::string& serviceName);
 
     std::mutex sync;
     size_t deviceIndex;

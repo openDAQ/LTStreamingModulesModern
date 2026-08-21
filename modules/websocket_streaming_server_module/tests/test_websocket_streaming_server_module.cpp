@@ -1,62 +1,4 @@
-#include <websocket_streaming_server_module/module_dll.h>
-#include <websocket_streaming_server_module/ws_streaming_server_module.h>
-#include <websocket_streaming_server_module/version.h>
-#include <websocket_streaming/constants.h>
-#include <websocket_streaming/ws_streaming_server.h>
-#include <coreobjects/property_factory.h>
-#include <coreobjects/property_object_factory.h>
-#include <opendaq/context_factory.h>
-#include <opendaq/instance_factory.h>
-#include <opendaq/instance_ptr.h>
-#include <opendaq/module_manager_factory.h>
-#include <opendaq/logger_factory.h>
-#include <coretypes/type_manager_factory.h>
-#include <opendaq/module_ptr.h>
-#include <coretypes/common.h>
-#include <testutils/testutils.h>
-
-using namespace daq;
-using namespace daq::websocket_streaming;
-
-class WsStreamingServerModuleTest : public testing::Test
-{
-public:
-    void TearDown() override
-    {
-    }
-
-    static ContextPtr CreateContextWithModuleOptions(const DictPtr<IString, IBaseObject>& moduleOptions)
-    {
-        auto options = Dict<IString, IBaseObject>();
-        options.set("Modules", Dict<IString, IBaseObject>({{"StreamingLtServer", moduleOptions}}));
-
-        return NullContext(Logger(), TypeManager(), options);
-    }
-
-    static PropertyObjectPtr CreateWsOnlyConfig(const ModulePtr& module, Int wsPort)
-    {
-        auto config = module.getAvailableServerTypes().get("OpenDAQLTStreaming").createDefaultConfig();
-        config.setPropertyValue(PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER, True);
-        config.setPropertyValue(PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER, False);
-        config.setPropertyValue(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER, False);
-        config.setPropertyValue(PROPERTY_WS_STREAMING_PORT_SERVER, wsPort);
-        return config;
-    }
-};
-
-static ModulePtr CreateModule(ContextPtr context = NullContext())
-{
-    ModulePtr module;
-    createModule(&module, context);
-    return module;
-}
-
-static PropertyObjectPtr CreateServerConfig()
-{
-    auto module = CreateModule();
-    auto serverTypes = module.getAvailableServerTypes();
-    return serverTypes.get("OpenDAQLTStreaming").createDefaultConfig();
-}
+#include "test_websocket_streaming_server_module.h"
 
 TEST_F(WsStreamingServerModuleTest, CreateModule)
 {
@@ -114,7 +56,11 @@ TEST_F(WsStreamingServerModuleTest, ServerConfig)
     auto config = CreateServerConfig();
     ASSERT_TRUE(config.assigned());
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     ASSERT_EQ(config.getAllProperties().getCount(), 11u);
+#else
+    ASSERT_EQ(config.getAllProperties().getCount(), 5u);
+#endif
 
     ASSERT_TRUE(config.hasProperty(PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER));
     ASSERT_EQ(config.getProperty(PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER).getValueType(), CoreType::ctBool);
@@ -131,6 +77,8 @@ TEST_F(WsStreamingServerModuleTest, ServerConfig)
     ASSERT_TRUE(config.hasProperty(PROPERTY_WS_CONTROL_PORT_SERVER));
     ASSERT_EQ(config.getProperty(PROPERTY_WS_CONTROL_PORT_SERVER).getValueType(), CoreType::ctInt);
     ASSERT_EQ(config.getPropertyValue(PROPERTY_WS_CONTROL_PORT_SERVER), DEFAULT_WS_CONTROL_PORT);
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
 
     ASSERT_TRUE(config.hasProperty(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER));
     ASSERT_EQ(config.getProperty(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER).getValueType(), CoreType::ctBool);
@@ -153,6 +101,17 @@ TEST_F(WsStreamingServerModuleTest, ServerConfig)
     ASSERT_TRUE(config.hasProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_SERVER));
     ASSERT_EQ(config.getProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_SERVER).getValueType(), CoreType::ctString);
 
+#else
+
+    ASSERT_FALSE(config.hasProperty(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER));
+    ASSERT_FALSE(config.hasProperty(PROPERTY_ENABLE_MTLS_SERVER));
+    ASSERT_FALSE(config.hasProperty(PROPERTY_WSS_STREAMING_PORT_SERVER));
+    ASSERT_FALSE(config.hasProperty(PROPERTY_WSS_CERT_FILE_PATH_SERVER));
+    ASSERT_FALSE(config.hasProperty(PROPERTY_WSS_KEY_FILE_PATH_SERVER));
+    ASSERT_FALSE(config.hasProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_SERVER));
+
+#endif
+
     ASSERT_TRUE(config.hasProperty(PROPERTY_PATH_SERVER));
     ASSERT_EQ(config.getPropertyValue(PROPERTY_PATH_SERVER), "/");
 }
@@ -170,6 +129,8 @@ TEST_F(WsStreamingServerModuleTest, ServerConfigVisibility)
     ASSERT_TRUE(config.getProperty(PROPERTY_WS_CONTROL_PORT_SERVER).getVisible());
     config.setPropertyValue(PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER, False);
     ASSERT_FALSE(config.getProperty(PROPERTY_WS_CONTROL_PORT_SERVER).getVisible());
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
 
     config.setPropertyValue(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER, False);
     ASSERT_FALSE(config.getProperty(PROPERTY_ENABLE_MTLS_SERVER).getVisible());
@@ -193,55 +154,8 @@ TEST_F(WsStreamingServerModuleTest, ServerConfigVisibility)
     config.setPropertyValue(PROPERTY_ENABLE_MTLS_SERVER, True);
     config.setPropertyValue(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER, False);
     ASSERT_FALSE(config.getProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_SERVER).getVisible());
-}
 
-TEST_F(WsStreamingServerModuleTest, CreateServerRejectsMtlsWithoutCa)
-{
-    const auto instance = Instance();
-    auto module = CreateModule(instance.getContext());
-
-    auto config = module.getAvailableServerTypes().get("OpenDAQLTStreaming").createDefaultConfig();
-    config.setPropertyValue(PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER, False);
-    config.setPropertyValue(PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER, False);
-    config.setPropertyValue(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER, True);
-
-    ASSERT_THROW_MSG(module.createServer("OpenDAQLTStreaming", instance.getRootDevice(), config),
-                     InvalidParameterException,
-                     "Mutual TLS is enabled but no CA certificate file path is configured");
-}
-
-TEST_F(WsStreamingServerModuleTest, CreateServerRejectsEmptyCertificatePath)
-{
-    const auto instance = Instance();
-    auto module = CreateModule(instance.getContext());
-
-    auto config = module.getAvailableServerTypes().get("OpenDAQLTStreaming").createDefaultConfig();
-    config.setPropertyValue(PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER, False);
-    config.setPropertyValue(PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER, False);
-    config.setPropertyValue(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER, True);
-    config.setPropertyValue(PROPERTY_ENABLE_MTLS_SERVER, False);
-    config.setPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_SERVER, "some-key.pem");
-
-    ASSERT_THROW_MSG(module.createServer("OpenDAQLTStreaming", instance.getRootDevice(), config),
-                     InvalidParameterException,
-                     "TLS certificate or key file path is not configured");
-}
-
-TEST_F(WsStreamingServerModuleTest, CreateServerRejectsEmptyKeyPath)
-{
-    const auto instance = Instance();
-    auto module = CreateModule(instance.getContext());
-
-    auto config = module.getAvailableServerTypes().get("OpenDAQLTStreaming").createDefaultConfig();
-    config.setPropertyValue(PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER, False);
-    config.setPropertyValue(PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER, False);
-    config.setPropertyValue(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER, True);
-    config.setPropertyValue(PROPERTY_ENABLE_MTLS_SERVER, False);
-    config.setPropertyValue(PROPERTY_WSS_CERT_FILE_PATH_SERVER, "some-cert.pem");
-
-    ASSERT_THROW_MSG(module.createServer("OpenDAQLTStreaming", instance.getRootDevice(), config),
-                     InvalidParameterException,
-                     "TLS certificate or key file path is not configured");
+#endif
 }
 
 TEST_F(WsStreamingServerModuleTest, AddCapabilityWsOnly)
@@ -321,7 +235,11 @@ TEST_F(WsStreamingServerModuleTest, PartialConfigIsCompleted)
     ASSERT_NO_THROW((server = createWithImplementation<IServer, websocket_streaming::WsStreamingServer>(
                          instance.getRootDevice(), config, instance.getContext())));
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     ASSERT_EQ(config.getAllProperties().getCount(), 11u);
+#else
+    ASSERT_EQ(config.getAllProperties().getCount(), 5u);
+#endif
     ASSERT_TRUE(config.hasProperty(PROPERTY_PATH_SERVER));
     ASSERT_EQ(config.getPropertyValue(PROPERTY_PATH_SERVER), "/");
     ASSERT_EQ(config.getPropertyValue(PROPERTY_WS_STREAMING_PORT_SERVER), DEFAULT_WS_STREAMING_PORT);
@@ -344,7 +262,9 @@ TEST_F(WsStreamingServerModuleTest, PartialConfigPreservesUserValues)
         instance.getRootDevice(), config, instance.getContext());
 
     ASSERT_EQ(config.getPropertyValue(PROPERTY_WS_STREAMING_PORT_SERVER), 7655);
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     ASSERT_EQ(config.getPropertyValue(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER), DEFAULT_ENABLE_WSS_STREAMING_PORT);
+#endif
     ASSERT_EQ(instance.getRootDevice().getInfo().getServerCapability(CONST_LT_STREAMING_ID).getPort(), 7655);
 
     server.stop();
@@ -364,7 +284,11 @@ TEST_F(WsStreamingServerModuleTest, PartialConfigKeepsForeignProperties)
     ASSERT_NO_THROW((server = createWithImplementation<IServer, websocket_streaming::WsStreamingServer>(
                          instance.getRootDevice(), config, instance.getContext())));
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     ASSERT_EQ(config.getAllProperties().getCount(), 12u);
+#else
+    ASSERT_EQ(config.getAllProperties().getCount(), 6u);
+#endif
     ASSERT_EQ(config.getPropertyValue("SomeForeignProperty"), "keep me");
 
     server.stop();
@@ -378,26 +302,17 @@ TEST_F(WsStreamingServerModuleTest, CreateServerRejectsAllChannelsDisabled)
     auto config = CreateWsOnlyConfig(module, 7657);
     config.setPropertyValue(PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER, False);
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     ASSERT_THROW_MSG(module.createServer("OpenDAQLTStreaming", instance.getRootDevice(), config),
                      InvalidParameterException,
                      "Neither the websocket streaming port nor the TLS streaming port is enabled");
-
-    ASSERT_FALSE(instance.getRootDevice().getInfo().hasServerCapability(CONST_LT_STREAMING_ID));
-}
-
-TEST_F(WsStreamingServerModuleTest, CreateServerRejectsControlPortWithoutStreamingPort)
-{
-    const auto instance = Instance();
-    auto module = CreateModule(instance.getContext());
-
-    auto config = CreateWsOnlyConfig(module, 7658);
-    config.setPropertyValue(PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER, False);
-    config.setPropertyValue(PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER, True);
-    config.setPropertyValue(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER, True);
-
+#else
     ASSERT_THROW_MSG(module.createServer("OpenDAQLTStreaming", instance.getRootDevice(), config),
                      InvalidParameterException,
-                     "The control port cannot be enabled without the websocket streaming port");
+                     "The websocket streaming port is not enabled");
+#endif
+
+    ASSERT_FALSE(instance.getRootDevice().getInfo().hasServerCapability(CONST_LT_STREAMING_ID));
 }
 
 TEST_F(WsStreamingServerModuleTest, ProviderOptionsOverrideDefaults)
@@ -433,7 +348,11 @@ TEST_F(WsStreamingServerModuleTest, ProviderOptionsIgnoreUnknownKeys)
     PropertyObjectPtr config;
     ASSERT_NO_THROW(config = WsStreamingServer::createDefaultConfig(context));
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     ASSERT_EQ(config.getAllProperties().getCount(), 11u);
+#else
+    ASSERT_EQ(config.getAllProperties().getCount(), 5u);
+#endif
     ASSERT_FALSE(config.hasProperty("NoSuchProperty"));
     ASSERT_EQ(config.getPropertyValue(PROPERTY_WS_STREAMING_PORT_SERVER), 7661);
 }

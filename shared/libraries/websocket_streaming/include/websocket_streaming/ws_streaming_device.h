@@ -59,16 +59,27 @@ class WsStreamingDevice : public Device
          */
         static DeviceTypePtr createNewType();
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+
         /*!
          * @brief Creates an openDAQ device type for the new-style `daq.lts://` connection string
          * with secure TLS channel.
+         *
+         * Only available in a build with the TLS channel enabled.
          *
          * @return An openDAQ device type for the new-style `daq.lts://` connection string.
          */
         static DeviceTypePtr createNewSecureType();
 
+#endif
+
         static PropertyObjectPtr createDefaultConfig();
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+
         static PropertyObjectPtr createDefaultSecureConfig();
+
+#endif
 
         /*!
          * @brief Opens a new WebSocket streaming connection.

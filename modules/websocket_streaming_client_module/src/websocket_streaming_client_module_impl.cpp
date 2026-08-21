@@ -54,7 +54,11 @@ WebsocketStreamingClientModule::WebsocketStreamingClientModule(ContextPtr contex
     , deviceIndex(0)
     , discoveryClient({CONST_SERVICE_CAPABILITY})
 {
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     discoveryClient.initMdnsClient(List<IString>(CONST_LT_SERVICE_NAME, CONST_LTS_SERVICE_NAME, CONST_WS_SERVICE_NAME));
+#else
+    discoveryClient.initMdnsClient(List<IString>(CONST_LT_SERVICE_NAME, CONST_WS_SERVICE_NAME));
+#endif
     loggerComponent = this->context.getLogger().getOrAddComponent("StreamingLTClient");
 }
 
@@ -62,7 +66,15 @@ ListPtr<IDeviceInfo> WebsocketStreamingClientModule::onGetAvailableDevices()
 {
     auto availableDevices = List<IDeviceInfo>();
     for (const auto& device : discoveryClient.discoverMdnsDevices())
+    {
+        if (!isSupportedServiceName(device.serviceName))
+        {
+            LOG_D("Ignoring discovered service \"{}\": not supported by this module", device.serviceName)
+            continue;
+        }
+
         availableDevices.pushBack(populateDiscoveredDevice(device));
+    }
     return availableDevices;
 }
 
@@ -72,11 +84,14 @@ DictPtr<IString, IDeviceType> WebsocketStreamingClientModule::onGetAvailableDevi
 
     const auto websocketDeviceType = WsStreamingDevice::createNewType();
     const auto oldWebsocketDeviceType = WsStreamingDevice::createOldType();
-    const auto secureWebsocketDeviceType = WsStreamingDevice::createNewSecureType();
 
     result.set(websocketDeviceType.getId(), websocketDeviceType);
     result.set(oldWebsocketDeviceType.getId(), oldWebsocketDeviceType);
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+    const auto secureWebsocketDeviceType = WsStreamingDevice::createNewSecureType();
     result.set(secureWebsocketDeviceType.getId(), secureWebsocketDeviceType);
+#endif
 
     return result;
 }
@@ -86,10 +101,12 @@ DictPtr<IString, IStreamingType> WebsocketStreamingClientModule::onGetAvailableS
     auto result = Dict<IString, IStreamingType>();
 
     auto websocketStreamingType = WsStreaming::createType();
-    auto secureWebsocketStreamingType = WsStreaming::createSecureType();
-
     result.set(websocketStreamingType.getId(), websocketStreamingType);
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+    auto secureWebsocketStreamingType = WsStreaming::createSecureType();
     result.set(secureWebsocketStreamingType.getId(), secureWebsocketStreamingType);
+#endif
 
     return result;
 }
@@ -115,20 +132,17 @@ DevicePtr WebsocketStreamingClientModule::onCreateDevice(const StringPtr& connec
 
     PropertyObjectPtr deviceConfig = config;
     if (!deviceConfig.assigned())
-        deviceConfig = isSecureConnection(formedConnectionStr) ? WsStreamingDevice::createDefaultSecureConfig()
-                                                               : WsStreamingDevice::createDefaultConfig();
+        deviceConfig = createDefaultDeviceConfig(formedConnectionStr);
 
     std::scoped_lock lock(sync);
 
     std::string localId = fmt::format("websocket_pseudo_device{}", deviceIndex++);
-    auto deviceType =
-        isSecureConnection(formedConnectionStr) ? WsStreamingDevice::createNewSecureType() : WsStreamingDevice::createNewType();
+    auto deviceType = createDeviceType(formedConnectionStr);
     checkErrorInfo(deviceType.asPtr<IComponentTypePrivate>()->setModuleInfo(moduleInfo));
     auto device = createWithImplementation<IDevice, WsStreamingDevice>(context, parent, localId, formedConnectionStr, deviceType, deviceConfig);
 
     // Set the connection info for the device
-    const auto wsStreamingType =
-        (isSecureConnection(formedConnectionStr)) ? WsStreaming::createSecureType() : WsStreaming::createType();
+    const auto wsStreamingType = createStreamingType(formedConnectionStr);
 
     ServerCapabilityConfigPtr connectionInfo = device.getInfo().getConfigurationConnectionInfo();
     connectionInfo.setProtocolId(wsStreamingType.getId());
@@ -174,9 +188,7 @@ StreamingPtr WebsocketStreamingClientModule::onCreateStreaming(const StringPtr& 
 
     PropertyObjectPtr streamingConfig = config;
     if (!streamingConfig.assigned())
-        streamingConfig = isSecureConnection(formNewStyleConnectionString(connectionString).toStdString())
-                              ? WsStreaming::createDefaultSecureConfig()
-                              : WsStreaming::createDefaultConfig();
+        streamingConfig = createDefaultStreamingConfig(formNewStyleConnectionString(connectionString));
 
     const StringPtr str = formConnectionString(connectionString, streamingConfig);
     return createWithImplementation<IStreaming, WsStreaming>(str, context, streamingConfig);
@@ -185,8 +197,13 @@ StreamingPtr WebsocketStreamingClientModule::onCreateStreaming(const StringPtr& 
 Bool WebsocketStreamingClientModule::onCompleteServerCapability(const ServerCapabilityPtr& source, const ServerCapabilityConfigPtr& target)
 {
     const auto protoId = target.getProtocolId();
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     if (protoId != CONST_LT_STREAMING_ID && protoId != CONST_LTS_STREAMING_ID)
         return false;
+#else
+    if (protoId != CONST_LT_STREAMING_ID)
+        return false;
+#endif
 
     if (source.getConnectionType() != "TCP/IP")
         return false;
@@ -241,6 +258,46 @@ Bool WebsocketStreamingClientModule::onCompleteServerCapability(const ServerCapa
     }
 
     return true;
+}
+
+PropertyObjectPtr WebsocketStreamingClientModule::createDefaultDeviceConfig(const StringPtr& connectionString)
+{
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+    if (isSecureConnection(connectionString))
+        return WsStreamingDevice::createDefaultSecureConfig();
+#endif
+
+    return WsStreamingDevice::createDefaultConfig();
+}
+
+PropertyObjectPtr WebsocketStreamingClientModule::createDefaultStreamingConfig(const StringPtr& connectionString)
+{
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+    if (isSecureConnection(connectionString))
+        return WsStreaming::createDefaultSecureConfig();
+#endif
+
+    return WsStreaming::createDefaultConfig();
+}
+
+DeviceTypePtr WebsocketStreamingClientModule::createDeviceType(const StringPtr& connectionString)
+{
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+    if (isSecureConnection(connectionString))
+        return WsStreamingDevice::createNewSecureType();
+#endif
+
+    return WsStreamingDevice::createNewType();
+}
+
+StreamingTypePtr WebsocketStreamingClientModule::createStreamingType(const StringPtr& connectionString)
+{
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+    if (isSecureConnection(connectionString))
+        return WsStreaming::createSecureType();
+#endif
+
+    return WsStreaming::createType();
 }
 
 StringPtr WebsocketStreamingClientModule::createUrlConnectionString(bool secureType,
@@ -330,12 +387,14 @@ DeviceInfoPtr WebsocketStreamingClientModule::populateDiscoveredDevice(const Mdn
         streamingType = WsStreaming::createType();
         deviceType = WsStreamingDevice::createNewType();
     }
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     else if (discoveredDevice.serviceName == CONST_LTS_SERVICE_NAME)
     {
         isSecure = true;
         streamingType = WsStreaming::createSecureType();
         deviceType = WsStreamingDevice::createNewSecureType();
     }
+#endif
     else
     {
         DAQ_THROW_EXCEPTION(InvalidParameterException,
@@ -385,6 +444,19 @@ bool WebsocketStreamingClientModule::isSecureConnection(const std::string& conne
 {
     const auto securePrefix = std::string(CONST_LTS_STREAMING_PREFIX) + "://";
     return connectionString.find(securePrefix) != std::string::npos;
+}
+
+bool WebsocketStreamingClientModule::isSupportedServiceName(const std::string& serviceName)
+{
+    if (serviceName == CONST_LT_SERVICE_NAME || serviceName == CONST_WS_SERVICE_NAME)
+        return true;
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+    if (serviceName == CONST_LTS_SERVICE_NAME)
+        return true;
+#endif
+
+    return false;
 }
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING_CLIENT_MODULE

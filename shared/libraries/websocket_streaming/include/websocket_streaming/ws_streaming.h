@@ -79,16 +79,27 @@ class WsStreaming : public Streaming
          */
         static StreamingTypePtr createType();
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+
         /*!
          * @brief Creates an openDAQ streaming type object using the `daq.lts://` prefix
          * with secure TLS channel.
+         *
+         * Only available in a build with the TLS channel enabled.
          *
          * @return An openDAQ streaming type object using the `daq.lts://` prefix.
          */
         static StreamingTypePtr createSecureType();
 
+#endif
+
         static PropertyObjectPtr createDefaultConfig();
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+
         static PropertyObjectPtr createDefaultSecureConfig();
+
+#endif
 
     public:
 
