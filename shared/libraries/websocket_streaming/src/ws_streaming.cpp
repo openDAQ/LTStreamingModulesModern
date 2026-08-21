@@ -31,6 +31,7 @@
 #include <opendaq/streaming_impl.h>
 
 #include <ws-streaming/connection.hpp>
+#include <ws-streaming/quantities.hpp>
 #include <ws-streaming/remote_signal.hpp>
 #include "websocket_streaming/constants.h"
 
@@ -387,14 +388,14 @@ void WsStreaming::onConnected(
 
     onAvailableConnection = wsConnection->on_available.connect(
         std::bind(&WsStreaming::onRemoteSignalAvailable, this, _1));
+    onUndeclaredAvailableConnection = wsConnection->on_undeclared_available.connect(
+        std::bind(&WsStreaming::onRemoteSignalUndeclaredAvailable, this, _1));
     onUnavailableConnection = wsConnection->on_unavailable.connect(
         std::bind(&WsStreaming::onRemoteSignalUnavailable, this, _1));
 }
 
-void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
+std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::addRemoteSignal(wss::remote_signal_ptr signal)
 {
-    LOG_I("Signal available: {}", signal->id());
-
     auto entry = std::make_shared<WsStreamingRemoteSignalEntry>();
     entry->ptr = signal;
 
@@ -405,11 +406,48 @@ void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
     entry->onDataReceived       = signal->on_data_received      .connect(std::bind(&WsStreaming::onRemoteSignalDataReceived,    this, weakEntry, _1, _2, _3, _4));
     entry->onUnsubscribed       = signal->on_unsubscribed       .connect(std::bind(&WsStreaming::onRemoteSignalUnsubscribed,    this, weakEntry));
 
-    signals[signal->id()] = std::move(entry);
+    signals[signal->id()] = entry;
+
+    return entry;
+}
+
+void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
+{
+    LOG_I("Signal available: {}", signal->id());
+
+    addRemoteSignal(signal);
 
     // Do not immediately register the new signal with openDAQ. We need its metadata first so
     // we can make an openDAQ descriptor. Do an initial subscribe to get that metadata.
     signal->subscribe();
+}
+
+void WsStreaming::onRemoteSignalUndeclaredAvailable(wss::remote_signal_ptr signal)
+{
+    LOG_I("Undeclared signal available: {}", signal->id());
+
+    // The peer is already streaming this signal and its metadata is on the way, so there is
+    // nothing to subscribe to in order to obtain it.
+    addRemoteSignal(signal)->isUndeclared = true;
+}
+
+std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::findDomainSignalInTable(
+    const std::string& tableId,
+    const std::shared_ptr<WsStreamingRemoteSignalEntry>& exclude)
+{
+    // Peers which do not name a table after its domain signal leave the quantity as the only
+    // way to tell which member of the table is the domain signal.
+    for (const auto& [id, candidate] : signals)
+    {
+        if (candidate == exclude || candidate->ptr->metadata().table_id() != tableId)
+            continue;
+
+        if (auto unit = candidate->ptr->metadata().unit();
+                unit && unit->quantity() == wss::quantities::time)
+            return candidate;
+    }
+
+    return nullptr;
 }
 
 void WsStreaming::onRemoteSignalSubscribed(std::weak_ptr<WsStreamingRemoteSignalEntry> weakEntry)
@@ -446,6 +484,11 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
                 && it->second != entry)
         {
             entry->domainEntry = it->second;
+            LOG_I("Signal {} domain now points to {}", entry->ptr->id(), entry->domainEntry->ptr->id());
+        }
+        else if (auto domainEntry = findDomainSignalInTable(tableId, entry); domainEntry)
+        {
+            entry->domainEntry = domainEntry;
             LOG_I("Signal {} domain now points to {}", entry->ptr->id(), entry->domainEntry->ptr->id());
         }
         else
@@ -489,7 +532,11 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
             entry->ptr,
             entry->domainEntry ? entry->domainEntry->ptr : nullptr,
             entry->descriptor);
-        entry->ptr->unsubscribe();
+
+        // Undeclared signals were never subscribed by us, and the peer streams them only for as
+        // long as something in their table is subscribed.
+        if (!entry->isUndeclared)
+            entry->ptr->unsubscribe();
     }
 }
 

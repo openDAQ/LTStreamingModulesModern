@@ -154,6 +154,14 @@ class WsStreaming : public Streaming
 
         void onRemoteSignalAvailable(wss::remote_signal_ptr signal);
 
+        void onRemoteSignalUndeclaredAvailable(wss::remote_signal_ptr signal);
+
+        std::shared_ptr<WsStreamingRemoteSignalEntry> addRemoteSignal(wss::remote_signal_ptr signal);
+
+        std::shared_ptr<WsStreamingRemoteSignalEntry> findDomainSignalInTable(
+            const std::string& tableId,
+            const std::shared_ptr<WsStreamingRemoteSignalEntry>& exclude);
+
         void onRemoteSignalSubscribed(std::weak_ptr<WsStreamingRemoteSignalEntry> weakEntry);
 
         void onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteSignalEntry> weakEntry);
@@ -176,6 +184,7 @@ class WsStreaming : public Streaming
         wss::connection_ptr wsConnection;
 
         boost::signals2::scoped_connection onAvailableConnection;
+        boost::signals2::scoped_connection onUndeclaredAvailableConnection;
         boost::signals2::scoped_connection onUnavailableConnection;
 
         std::map<std::string, std::shared_ptr<WsStreamingRemoteSignalEntry>> signals;

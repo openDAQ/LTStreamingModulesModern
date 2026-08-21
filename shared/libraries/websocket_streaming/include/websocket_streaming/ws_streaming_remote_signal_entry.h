@@ -63,6 +63,7 @@ struct WsStreamingRemoteSignalEntry
 
     bool isPublished = false;
     bool isSubscribed = false;
+    bool isUndeclared = false;  /**< True if the peer streams this signal without advertising it. */
 };
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
