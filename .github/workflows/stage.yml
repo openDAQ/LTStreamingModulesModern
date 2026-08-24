@@ -15,30 +15,18 @@ jobs:
     name: Resolve the core commit
     runs-on: ubuntu-latest
     outputs:
-      core-sha: ${{ steps.core.outputs.core-sha }}
-      channel: ${{ steps.core.outputs.channel }}
+      core-ref: ${{ steps.core.outputs.ref }}
+      channel: ${{ steps.channel.outputs.channel }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve the core commit and the publish channel
+      - uses: openDAQ/openDAQ-CI/.github/actions/resolve-channel@jira/TBBAS-3477-staging-check
+        id: channel
+
+      - name: Read the pinned core ref
         id: core
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          core_ref=$(cat opendaq_ref)
-          core_sha=$(gh api "/repos/openDAQ/openDAQ/commits/$core_ref" --jq .sha) \
-            || { echo "::error::opendaq_ref names no commit of openDAQ/openDAQ: $core_ref"; exit 1; }
-
-          case "$GITHUB_REF" in
-            refs/heads/release/*) channel=stable ;;
-            refs/heads/main)      channel=dev    ;;
-            *)                    channel=test   ;;
-          esac
-
-          echo "core-sha=$core_sha" >> "$GITHUB_OUTPUT"
-          echo "channel=$channel"   >> "$GITHUB_OUTPUT"
-          echo "opendaq_ref $core_ref -> $core_sha, channel $channel"
+        run: echo "ref=$(cat opendaq_ref)" >> "$GITHUB_OUTPUT"
 
   stage:
     needs: resolve
@@ -51,13 +39,13 @@ jobs:
       timeout: '[{"timeout-minutes": 180}]'
       staging-pull: >-
         [
-          { "artifact": "core-windows-2022-x86_64-msvs-v143-release",   "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-sha }}", "annotations": { "com.opendaq.custom.platform": "windows",        "com.opendaq.settings.arch": "x86_64" } }] },
-          { "artifact": "core-windows-2022-x86-msvs-v143-release",      "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-sha }}", "annotations": { "com.opendaq.custom.platform": "windows",        "com.opendaq.settings.arch": "x86"    } }] },
-          { "artifact": "core-manylinux_2_28-x86_64-ninja-gcc-release", "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-sha }}", "annotations": { "com.opendaq.custom.platform": "manylinux_2_28", "com.opendaq.settings.arch": "x86_64" } }] },
-          { "artifact": "core-ubuntu-22.04-x86_64-ninja-gcc-release",   "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-sha }}", "annotations": { "com.opendaq.custom.platform": "linux",          "com.opendaq.settings.arch": "x86_64" } }] },
-          { "artifact": "core-ubuntu-22.04-armv8-ninja-gcc-release",    "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-sha }}", "annotations": { "com.opendaq.custom.platform": "linux",          "com.opendaq.settings.arch": "armv8"  } }] },
-          { "artifact": "core-macos-26-x86_64-ninja-appleclang-release","packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-sha }}", "annotations": { "com.opendaq.custom.platform": "macos",          "com.opendaq.settings.arch": "x86_64" } }] },
-          { "artifact": "core-macos-26-armv8-ninja-appleclang-release", "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-sha }}", "annotations": { "com.opendaq.custom.platform": "macos",          "com.opendaq.settings.arch": "armv8"  } }] }
+          { "artifact": "core-windows-2022-x86_64-msvs-v143-release",   "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-ref }}", "annotations": { "com.opendaq.custom.platform": "windows",        "com.opendaq.settings.arch": "x86_64" } }] },
+          { "artifact": "core-windows-2022-x86-msvs-v143-release",      "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-ref }}", "annotations": { "com.opendaq.custom.platform": "windows",        "com.opendaq.settings.arch": "x86"    } }] },
+          { "artifact": "core-manylinux_2_28-x86_64-ninja-gcc-release", "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-ref }}", "annotations": { "com.opendaq.custom.platform": "manylinux_2_28", "com.opendaq.settings.arch": "x86_64" } }] },
+          { "artifact": "core-ubuntu-22.04-x86_64-ninja-gcc-release",   "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-ref }}", "annotations": { "com.opendaq.custom.platform": "linux",          "com.opendaq.settings.arch": "x86_64" } }] },
+          { "artifact": "core-ubuntu-22.04-armv8-ninja-gcc-release",    "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-ref }}", "annotations": { "com.opendaq.custom.platform": "linux",          "com.opendaq.settings.arch": "armv8"  } }] },
+          { "artifact": "core-macos-26-x86_64-ninja-appleclang-release","packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-ref }}", "annotations": { "com.opendaq.custom.platform": "macos",          "com.opendaq.settings.arch": "x86_64" } }] },
+          { "artifact": "core-macos-26-armv8-ninja-appleclang-release", "packages": [{ "path": "ghcr.io/openDAQ/test/staging/opendaq", "tag": "${{ needs.resolve.outputs.core-ref }}", "annotations": { "com.opendaq.custom.platform": "macos",          "com.opendaq.settings.arch": "armv8"  } }] }
         ]
       include-jobs: >-
         [
