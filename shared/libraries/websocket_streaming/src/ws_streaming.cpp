@@ -15,6 +15,7 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -41,6 +42,13 @@
 using namespace std::placeholders;
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
+
+using FetchState = WsStreamingRemoteSignalEntry::FetchState;
+
+// Initial-fetch retry tuning, measured against a real device (burst metadata <= ~1.1 s; >= 50 ms unsub/sub gap keeps ordering).
+static constexpr unsigned INITIAL_FETCH_MAX_ATTEMPTS = 3;
+static constexpr std::chrono::milliseconds INITIAL_FETCH_TIMEOUT{1500};
+static constexpr std::chrono::milliseconds INITIAL_FETCH_RETRY_DELAY{100};
 
 namespace
 {
@@ -87,6 +95,7 @@ WsStreaming::WsStreaming(
     : Streaming(connectionString, context, true)
     , ioContext{1}
     , wsClient(ioContext.get_executor())
+    , initialFetchTimer(ioContext)
 {
     // NOTE! The 'port' property is not used there. The formed 'connectionString'
     // must contain the port number.
@@ -320,6 +329,20 @@ void WsStreaming::onRemoveSignal(const MirroredSignalConfigPtr& signal)
 
 void WsStreaming::onSubscribeSignal(const StringPtr& signalId)
 {
+    // called on application threads; the signals map may only be touched on the I/O thread
+    boost::asio::post(ioContext,
+        [this, id = signalId.toStdString()] { subscribeRemoteSignal(id); });
+}
+
+void WsStreaming::onUnsubscribeSignal(const StringPtr& signalId)
+{
+    // called on application threads; the signals map may only be touched on the I/O thread
+    boost::asio::post(ioContext,
+        [this, id = signalId.toStdString()] { unsubscribeRemoteSignal(id); });
+}
+
+void WsStreaming::subscribeRemoteSignal(const std::string& signalId)
+{
     LOG_I("Asked to subscribe signal {}", signalId);
 
     if (auto signalIt = signals.find(signalId); signalIt != signals.end())
@@ -339,6 +362,19 @@ void WsStreaming::onSubscribeSignal(const StringPtr& signalId)
             return;
         }
 
+        // take over the wire subscription still held by the initial fetch: zero wire traffic
+        if (signalIt->second->fetchState == FetchState::Held)
+        {
+            LOG_I("Found signal, taking over the initial-fetch subscription");
+            signalIt->second->fetchState = FetchState::None;
+            signalIt->second->isSubscribed = true;
+            triggerSubscribeAck(signalId, true);
+
+            if (signalIt->second->descriptor.assigned())
+                emitDescriptorChangedEvents(signalIt->second);
+            return;
+        }
+
         LOG_I("Found signal, subscribing");
         signalIt->second->ptr->subscribe();
         signalIt->second->isSubscribed = true;
@@ -350,7 +386,7 @@ void WsStreaming::onSubscribeSignal(const StringPtr& signalId)
     }
 }
 
-void WsStreaming::onUnsubscribeSignal(const StringPtr& signalId)
+void WsStreaming::unsubscribeRemoteSignal(const std::string& signalId)
 {
     LOG_I("Asked to unsubscribe signal {}", signalId);
 
@@ -391,9 +427,11 @@ void WsStreaming::onConnected(
         std::bind(&WsStreaming::onRemoteSignalUnavailable, this, _1));
 }
 
-void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
+std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::createSignalEntry(wss::remote_signal_ptr signal)
 {
-    LOG_I("Signal available: {}", signal->id());
+    // an entry may already exist if a signal discovered as a hidden domain is later advertised
+    if (auto it = signals.find(signal->id()); it != signals.end())
+        return it->second;
 
     auto entry = std::make_shared<WsStreamingRemoteSignalEntry>();
     entry->ptr = signal;
@@ -405,11 +443,128 @@ void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
     entry->onDataReceived       = signal->on_data_received      .connect(std::bind(&WsStreaming::onRemoteSignalDataReceived,    this, weakEntry, _1, _2, _3, _4));
     entry->onUnsubscribed       = signal->on_unsubscribed       .connect(std::bind(&WsStreaming::onRemoteSignalUnsubscribed,    this, weakEntry));
 
-    signals[signal->id()] = std::move(entry);
+    signals[signal->id()] = entry;
+
+    return entry;
+}
+
+void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
+{
+    LOG_I("Signal available: {}", signal->id());
+
+    auto entry = createSignalEntry(signal);
+
+    // a reused entry (a hidden domain signal the device later advertises) needs no new fetch:
+    // it is already published, has its metadata, or a fetch is already in flight
+    if (entry->isPublished || entry->descriptor.assigned() || entry->fetchState == FetchState::Fetching)
+        return;
 
     // Do not immediately register the new signal with openDAQ. We need its metadata first so
     // we can make an openDAQ descriptor. Do an initial subscribe to get that metadata.
+    entry->fetchState = FetchState::Fetching;
+    entry->fetchAttempts = 1;
     signal->subscribe();
+
+    armInitialFetchSweep();
+}
+
+void WsStreaming::armInitialFetchSweep()
+{
+    if (initialFetchSweepArmed)
+        return;
+
+    initialFetchSweepArmed = true;
+    initialFetchTimer.expires_after(INITIAL_FETCH_TIMEOUT);
+    initialFetchTimer.async_wait(std::bind(&WsStreaming::onInitialFetchSweep, this, _1));
+}
+
+void WsStreaming::onInitialFetchSweep(const boost::system::error_code& ec)
+{
+    if (ec == boost::asio::error::operation_aborted)
+        return;
+
+    bool retrying = false;
+
+    for (const auto& [id, entry] : signals)
+    {
+        if (entry->isPublished)
+        {
+            // release a held fetch subscription only after a full sweep period, clear of app subscribes
+            if (entry->fetchState == FetchState::Held && ++entry->sweeps >= 2)
+            {
+                entry->fetchState = FetchState::None;
+                entry->ptr->unsubscribe();
+            }
+            continue;
+        }
+
+        // deferred entry: metadata arrived but the domain signal hasn't published;
+        // grant at least one full sweep period before dropping the domain link
+        if (entry->descriptor.assigned())
+        {
+            if (++entry->sweeps >= 2)
+                publishSignalEntry(entry);
+            continue;
+        }
+
+        if (entry->fetchState != FetchState::Fetching)
+            continue;
+
+        entry->ptr->unsubscribe();
+
+        if (entry->fetchAttempts >= INITIAL_FETCH_MAX_ATTEMPTS)
+        {
+            LOG_W("No metadata received for signal {}; giving up (without a descriptor the signal cannot be added to openDAQ)", id);
+            entry->fetchState = FetchState::None;
+            entry->fetchAttempts = 0;
+        }
+        else
+        {
+            entry->fetchState = FetchState::AwaitingRetry;
+            ++entry->fetchAttempts;
+            retrying = true;
+        }
+    }
+
+    if (retrying)
+    {
+        // stay marked busy so a new arrival cannot re-arm the timer and cancel this resubscribe
+        initialFetchTimer.expires_after(INITIAL_FETCH_RETRY_DELAY);
+        initialFetchTimer.async_wait(std::bind(&WsStreaming::onInitialFetchResubscribe, this, _1));
+    }
+
+    else
+    {
+        initialFetchSweepArmed = false;
+
+        // signals may still be awaiting metadata or deferred on a domain signal
+        if (anyInitialFetchPending())
+            armInitialFetchSweep();
+    }
+}
+
+void WsStreaming::onInitialFetchResubscribe(const boost::system::error_code& ec)
+{
+    if (ec == boost::asio::error::operation_aborted)
+        return;
+
+    initialFetchSweepArmed = false;
+    bool pending = false;
+
+    for (const auto& [id, entry] : signals)
+    {
+        // an assigned descriptor means metadata already arrived (entry is deferred, not lost)
+        if (entry->fetchState != FetchState::AwaitingRetry || entry->descriptor.assigned())
+            continue;
+
+        entry->fetchState = FetchState::Fetching;
+        entry->ptr->subscribe();
+        pending = true;
+    }
+
+    // also stay armed for fetches that arrived during the retry delay and deferred entries
+    if (pending || anyInitialFetchPending())
+        armInitialFetchSweep();
 }
 
 void WsStreaming::onRemoteSignalSubscribed(std::weak_ptr<WsStreamingRemoteSignalEntry> weakEntry)
@@ -439,19 +594,15 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
     {
         entry->lastPacket = nullptr;
         entry->descriptor = metadataToDescriptor(entry->ptr->metadata());
+        entry->domainEntry = resolveDomainEntry(entry);
 
-        std::string tableId = entry->ptr->metadata().table_id();
-
-        if (auto it = signals.find(tableId); it != signals.end()
-                && it->second != entry)
+        if (entry->domainEntry)
         {
-            entry->domainEntry = it->second;
-            LOG_I("Signal {} domain now points to {}", entry->ptr->id(), entry->domainEntry->ptr->id());
+            LOG_D("Signal {} domain now points to {}", entry->ptr->id(), entry->domainEntry->ptr->id());
         }
         else
         {
-            LOG_I("Signal {} domain now points to nullptr", entry->ptr->id());
-            entry->domainEntry = nullptr;
+            LOG_D("Signal {} domain now points to nullptr", entry->ptr->id());
         }
     }
 
@@ -464,33 +615,149 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
     }
 
     if (entry->descriptor.assigned() && entry->isPublished)
-    {
-        auto packet = DataDescriptorChangedEventPacket(entry->descriptor, nullptr);
-        onPacket(entry->ptr->id(), packet);
-
-        // changed signal is time signal
-        if (entry->ptr->id() == entry->ptr->metadata().table_id())
-        {
-            packet = DataDescriptorChangedEventPacket(nullptr, entry->descriptor);
-            for (const auto& [id, dataSignalEntry] : signals)
-            {
-                if (dataSignalEntry->ptr->metadata().table_id() == entry->ptr->id() &&
-                    dataSignalEntry != entry)
-                    onPacket(dataSignalEntry->ptr->id(), packet);
-            }
-        }
-    }
+        emitDescriptorChangedEvents(entry);
     if (entry->descriptor.assigned() && !entry->isPublished)
     {
-        LOG_I("Signal {} is now ready, publishing it", entry->ptr->id());
-        entry->isPublished = true;
+        // defer until the domain publishes: publishSignalEntry() then publishes this signal too;
+        // if the domain never publishes, the sweep publishes this signal without the domain link
+        if (entry->domainEntry && !entry->domainEntry->isPublished)
+        {
+            LOG_D("Deferring signal {} until its domain signal {} is published",
+                entry->ptr->id(), entry->domainEntry->ptr->id());
+            armInitialFetchSweep();
+        }
+        else
+        {
+            publishSignalEntry(entry);
+        }
+    }
+}
+
+void WsStreaming::emitDescriptorChangedEvents(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry)
+{
+    auto packet = DataDescriptorChangedEventPacket(entry->descriptor, nullptr);
+    onPacket(entry->ptr->id(), packet);
+
+    // propagate to signals that use this signal as their domain
+    packet = DataDescriptorChangedEventPacket(nullptr, entry->descriptor);
+    for (const auto& [id, dataSignalEntry] : signals)
+    {
+        if (dataSignalEntry != entry &&
+            dataSignalEntry->domainEntry == entry &&
+            dataSignalEntry->isPublished)
+            onPacket(dataSignalEntry->ptr->id(), packet);
+    }
+}
+
+void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry)
+{
+    LOG_I("Signal {} is now ready, publishing it", entry->ptr->id());
+
+    if (entry->domainEntry && !entry->domainEntry->isPublished)
+    {
+        LOG_W("Signal {} is published without a link to its domain signal {}, which was never published",
+            entry->ptr->id(), entry->domainEntry->ptr->id());
+    }
+
+    entry->isPublished = true;
+
+    // a throw from here would escape into the Boost.Asio I/O thread and terminate the process
+    try
+    {
         addToAvailableSignals(entry->ptr->id());
         onSignalAvailable(
             entry->ptr,
-            entry->domainEntry ? entry->domainEntry->ptr : nullptr,
+            entry->domainEntry && entry->domainEntry->isPublished ? entry->domainEntry->ptr : nullptr,
             entry->descriptor);
-        entry->ptr->unsubscribe();
     }
+
+    catch (const std::exception& ex)
+    {
+        LOG_E("Failed to register signal {} with openDAQ: {}", entry->ptr->id(), ex.what());
+    }
+
+    // keep the fetch subscription so an immediate application subscribe can take it over
+    if (entry->fetchState == FetchState::Fetching)
+    {
+        entry->fetchState = FetchState::Held;
+        armInitialFetchSweep();
+    }
+    else
+        entry->fetchState = FetchState::None;
+
+    entry->fetchAttempts = 0;
+    entry->sweeps = 0; // the counter now times the hold instead of the deferral
+
+    // publish signals that were deferred waiting for this signal as their domain
+    for (const auto& [id, dependent] : signals)
+        if (dependent != entry && dependent->domainEntry == entry
+                && !dependent->isPublished && dependent->descriptor.assigned())
+            publishSignalEntry(dependent);
+}
+
+bool WsStreaming::anyInitialFetchPending() const
+{
+    // deferred entries (descriptor but unpublished) and held fetch subscriptions still need the sweep
+    for (const auto& [id, entry] : signals)
+        if (entry->fetchState == FetchState::Held
+                || (!entry->isPublished && (entry->fetchState == FetchState::Fetching || entry->descriptor.assigned())))
+            return true;
+
+    return false;
+}
+
+std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::resolveDomainEntry(
+    const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry)
+{
+    std::string tableId = entry->ptr->metadata().table_id();
+
+    if (tableId.empty() || tableId == entry->ptr->id())
+        return nullptr;
+
+    // openDAQ servers advertise domain signals and use the domain signal's ID as the table ID
+    if (auto it = signals.find(tableId); it != signals.end() && it->second != entry)
+        return it->second;
+
+    // other devices reference a hidden domain signal via "relatedSignals"
+    std::string domainSignalId;
+    const auto& metadataJson = entry->ptr->metadata().json();
+
+    if (auto relatedIt = metadataJson.find("relatedSignals");
+            relatedIt != metadataJson.end() && relatedIt->is_array())
+        for (const auto& related : *relatedIt)
+            if (related.is_object()
+                    && related.value("type", std::string()) == "time"
+                    && related.contains("signalId")
+                    && related["signalId"].is_string())
+            {
+                domainSignalId = related["signalId"];
+                break;  // first "time" entry wins
+            }
+
+    if (domainSignalId.empty() || domainSignalId == entry->ptr->id())
+        return nullptr;
+
+    if (auto it = signals.find(domainSignalId); it != signals.end() && it->second != entry)
+        return it->second;
+
+    if (!wsConnection)
+        return nullptr;
+
+    // the connection knows hidden signals: the peer's acks/metadata create remote signal objects
+    auto domainSignal = wsConnection->find_remote_signal(domainSignalId);
+    if (!domainSignal)
+        return nullptr;
+
+    LOG_D("Discovered hidden domain signal {} of signal {}", domainSignalId, entry->ptr->id());
+
+    auto domainEntry = createSignalEntry(domainSignal);
+
+    // process its already-received metadata now so it publishes before the referencing signal
+    // (if the metadata hasn't arrived yet, its later arrival publishes the entry instead)
+    if (!domainSignal->metadata().json().empty())
+        onRemoteSignalMetadataChanged(domainEntry);
+
+    return domainEntry;
 }
 
 void WsStreaming::onRemoteSignalDataReceived(
@@ -561,6 +828,13 @@ void WsStreaming::onRemoteSignalUnsubscribed(std::weak_ptr<WsStreamingRemoteSign
         return;
 
     LOG_I("Signal unsubscribed: {}", entry->ptr->id());
+
+    // a remote unsubscribe ends a held fetch subscription: release it so a later subscribe sends a request
+    if (entry->fetchState == FetchState::Held)
+    {
+        entry->fetchState = FetchState::None;
+        entry->ptr->unsubscribe();
+    }
 
     if (entry->isSubscribed)
     {

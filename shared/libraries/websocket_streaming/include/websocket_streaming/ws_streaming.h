@@ -25,6 +25,7 @@
 #include <thread>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/signals2/connection.hpp>
 #include <boost/signals2/signal.hpp>
 #include <boost/system/error_code.hpp>
@@ -47,12 +48,13 @@ BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
  * This object uses the ws-streaming library to establish a WebSocket streaming connection to a
  * remote peer.
  *
- * openDAQ requires signal objects to have a valid descriptor, even if they are not connected. In
- * contrast, the WebSocket Streaming protocol only provides signal metadata after a signal has
- * been subscribed. To solve this, the streaming object does not immediately register signals with
- * openDAQ when they become available. Instead, it does an initial subscribe. When the signal's
- * metadata is received, the signal is then unsubscribed, and registered with openDAQ using
- * addToAvailableSignals() now that its metadata is known and a valid descriptor can be created.
+ * openDAQ signals need a valid descriptor, but the WebSocket Streaming protocol only provides
+ * metadata once a signal is subscribed. New signals are therefore first subscribed to fetch
+ * their metadata, and registered via addToAvailableSignals() once a descriptor can be built.
+ * The fetch subscription is briefly kept afterwards so an immediate application subscribe can
+ * take it over without wire traffic (devices may process a back-to-back unsubscribe/subscribe
+ * pair out of order); a sweep timer releases it if unused. A takeover replays the cached
+ * descriptor to openDAQ.
  *
  * Once registered with openDAQ, the onAddSignal() and onRemoveSignal() functions are implemented
  * to manage the subscription state of each known signal. When data is received for an active
@@ -152,6 +154,15 @@ class WsStreaming : public Streaming
             const boost::system::error_code& ec,
             wss::connection_ptr connection);
 
+        /*! @brief I/O-thread implementation of onSubscribeSignal(). */
+        void subscribeRemoteSignal(const std::string& signalId);
+
+        /*! @brief I/O-thread implementation of onUnsubscribeSignal(). */
+        void unsubscribeRemoteSignal(const std::string& signalId);
+
+        /*! @brief Creates a tracking entry for a remote signal and connects its event slots. */
+        std::shared_ptr<WsStreamingRemoteSignalEntry> createSignalEntry(wss::remote_signal_ptr signal);
+
         void onRemoteSignalAvailable(wss::remote_signal_ptr signal);
 
         void onRemoteSignalSubscribed(std::weak_ptr<WsStreamingRemoteSignalEntry> weakEntry);
@@ -169,6 +180,23 @@ class WsStreaming : public Streaming
 
         void onRemoteSignalUnavailable(wss::remote_signal_ptr signal);
 
+        /*! @brief Finds a signal's domain entry by table ID or via "relatedSignals", discovering hidden domain signals on demand. */
+        std::shared_ptr<WsStreamingRemoteSignalEntry> resolveDomainEntry(
+            const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
+
+        /*! @brief Registers a signal with openDAQ, marks its initial-fetch subscription as held for takeover and publishes signals deferred on it. */
+        void publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
+
+        /*! @brief Pushes the entry's cached descriptor into openDAQ as descriptor-changed events, propagating to signals that use it as their domain. */
+        void emitDescriptorChangedEvents(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
+
+        /*! @brief Checks whether any signal is still awaiting initial metadata or deferred on an unpublished domain signal. */
+        bool anyInitialFetchPending() const;
+
+        void armInitialFetchSweep();
+        void onInitialFetchSweep(const boost::system::error_code& ec);
+        void onInitialFetchResubscribe(const boost::system::error_code& ec);
+
         boost::asio::io_context ioContext;
         std::thread thread;
 
@@ -179,6 +207,10 @@ class WsStreaming : public Streaming
         boost::signals2::scoped_connection onUnavailableConnection;
 
         std::map<std::string, std::shared_ptr<WsStreamingRemoteSignalEntry>> signals;
+
+        /** Re-subscribes signals whose initial metadata fetch was dropped (some devices drop concurrent requests). */
+        boost::asio::steady_timer initialFetchTimer;
+        bool initialFetchSweepArmed = false;
 
         std::promise<boost::system::error_code> promise;
 };
