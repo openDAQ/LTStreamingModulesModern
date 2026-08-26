@@ -51,6 +51,8 @@ DeviceTypePtr WsStreamingDevice::createNewType()
         .build();
 }
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+
 DeviceTypePtr WsStreamingDevice::createNewSecureType()
 {
     return DeviceTypeBuilder()
@@ -61,6 +63,8 @@ DeviceTypePtr WsStreamingDevice::createNewSecureType()
         .setConnectionStringPrefix("daq.lts")
         .build();
 }
+
+#endif
 
 WsStreamingDevice::WsStreamingDevice(
         const ContextPtr& context,
@@ -91,10 +95,14 @@ PropertyObjectPtr WsStreamingDevice::createDefaultConfig()
     return WsStreaming::createDefaultConfig();
 }
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+
 PropertyObjectPtr WsStreamingDevice::createDefaultSecureConfig()
 {
     return WsStreaming::createDefaultSecureConfig();
 }
+
+#endif
 
 void WsStreamingDevice::removed()
 {

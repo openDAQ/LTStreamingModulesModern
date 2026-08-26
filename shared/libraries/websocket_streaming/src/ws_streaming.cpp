@@ -24,7 +24,6 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/asio/error.hpp>
 #include <boost/asio/post.hpp>
-#include <boost/asio/ssl/error.hpp>
 #include <boost/endian/conversion.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -39,6 +38,10 @@
 #include <websocket_streaming/metadata_to_descriptor.h>
 #include <websocket_streaming/ws_streaming.h>
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+#include <boost/asio/ssl/error.hpp>
+#endif
+
 using namespace std::placeholders;
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
@@ -49,6 +52,8 @@ using FetchState = WsStreamingRemoteSignalEntry::FetchState;
 static constexpr unsigned INITIAL_FETCH_MAX_ATTEMPTS = 3;
 static constexpr std::chrono::milliseconds INITIAL_FETCH_TIMEOUT{1500};
 static constexpr std::chrono::milliseconds INITIAL_FETCH_RETRY_DELAY{100};
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
 
 namespace
 {
@@ -66,6 +71,8 @@ bool isTlsRejection(bool isSecureChannel, const boost::system::error_code& ec)
 
 }
 
+#endif
+
 StreamingTypePtr WsStreaming::createType()
 {
     return StreamingTypeBuilder()
@@ -77,6 +84,8 @@ StreamingTypePtr WsStreaming::createType()
         .build();
 }
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+
 StreamingTypePtr WsStreaming::createSecureType()
 {
     return StreamingTypeBuilder()
@@ -87,6 +96,8 @@ StreamingTypePtr WsStreaming::createSecureType()
         .setConnectionStringPrefix(CONST_LTS_STREAMING_PREFIX)
         .build();
 }
+
+#endif
 
 WsStreaming::WsStreaming(
         const StringPtr& connectionString,
@@ -110,7 +121,19 @@ WsStreaming::WsStreaming(
     boost::replace_all(wsConnectionString, "daq.wss://", "wss://");
     bool isSecureChannel = wsConnectionString.find("wss://") != std::string::npos;
 
+#if !DAQMODULES_LT_STREAMING_ENABLE_TLS
+    if (isSecureChannel)
+    {
+        DAQ_THROW_EXCEPTION(InvalidParameterException,
+            "Cannot connect to {}: this module was built without TLS support",
+            connectionString.toStdString());
+    }
+
+#endif
+
     const auto effectiveConfig = populateConfigFromDefault(config, isSecureChannel);
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
 
     if (isSecureChannel)
     {
@@ -168,6 +191,8 @@ WsStreaming::WsStreaming(
         }
     }
 
+#endif
+
     // Start the ws-streaming connection attempt.
     LOG_I("Connecting to {}", wsConnectionString);
     wsClient.async_connect(wsConnectionString,
@@ -186,6 +211,8 @@ WsStreaming::WsStreaming(
         ioContext.stop();
         thread.join();
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+
         // A failure raised by the TLS layer means the peer was reached but not trusted.
         // That is an authentication problem.
         if (ec.category() == boost::asio::error::get_ssl_category())
@@ -203,6 +230,8 @@ WsStreaming::WsStreaming(
                 "the handshake ({}). This usually means the server rejected the client certificate",
                 connectionString.toStdString(), ec.message());
         }
+
+#endif
 
         DAQ_THROW_EXCEPTION(NotFoundException,
             "Failed to connect to {}: {}", connectionString.toStdString(), ec.message());
@@ -241,7 +270,12 @@ WsStreaming::~WsStreaming()
 
 PropertyObjectPtr WsStreaming::populateConfigFromDefault(const PropertyObjectPtr& config, bool secure)
 {
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     const auto defaultConfig = secure ? createDefaultSecureConfig() : createDefaultConfig();
+#else
+    (void) secure;
+    const auto defaultConfig = createDefaultConfig();
+#endif
 
     if (!config.assigned())
         return defaultConfig;
@@ -264,6 +298,8 @@ PropertyObjectPtr WsStreaming::createDefaultConfig()
     obj.addProperty(IntProperty(PROPERTY_WS_STREAMING_PORT_CLIENT, DEFAULT_WS_STREAMING_PORT));
     return obj;
 }
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
 
 PropertyObjectPtr WsStreaming::createDefaultSecureConfig()
 {
@@ -314,6 +350,8 @@ PropertyObjectPtr WsStreaming::createDefaultSecureConfig()
 
     return defaultConfig;
 }
+
+#endif
 
 void WsStreaming::onSetActive(bool active)
 {

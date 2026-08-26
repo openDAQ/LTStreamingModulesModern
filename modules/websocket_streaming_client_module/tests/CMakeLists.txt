@@ -6,6 +6,10 @@ set(TEST_SOURCES test_websocket_streaming_client_module.cpp
                  test_app.cpp
 )
 
+if (${REPO_OPTION_PREFIX}_ENABLE_TLS)
+    list(APPEND TEST_SOURCES test_websocket_streaming_client_module_tls.cpp)
+endif()
+
 add_executable(${TEST_APP} ${TEST_SOURCES}
 )
 

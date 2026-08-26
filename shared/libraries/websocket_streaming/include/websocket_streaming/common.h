@@ -16,5 +16,11 @@
 
 #pragma once
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS && !WS_STREAMING_ENABLE_TLS
+#error "DAQMODULES_LT_STREAMING_ENABLE_TLS is on, but ws-streaming was built without TLS support. \
+Rebuild ws-streaming with WS_STREAMING_ENABLE_TLS=ON, or configure this project with \
+DAQMODULES_LT_STREAMING_ENABLE_TLS=OFF."
+#endif
+
 #define BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING namespace daq::websocket_streaming {
 #define END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING }

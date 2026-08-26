@@ -107,6 +107,8 @@ PropertyObjectPtr WsStreamingServer::createDefaultConfig()
         defaultConfig.addProperty(builder.build());
     }
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+
     {
         auto builder = BoolPropertyBuilder(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER, DEFAULT_ENABLE_WSS_STREAMING_PORT);
         defaultConfig.addProperty(builder.build());
@@ -144,6 +146,8 @@ PropertyObjectPtr WsStreamingServer::createDefaultConfig()
                                                  PROPERTY_ENABLE_MTLS_SERVER + " == 1)"));
         defaultConfig.addProperty(builder.build());
     }
+
+#endif
 
     defaultConfig.addProperty(StringProperty(PROPERTY_PATH_SERVER, "/"));
     return defaultConfig;
@@ -187,14 +191,21 @@ WsStreamingServer::WsStreamingServer(
     addDefaultConfig(this->config);
 
     _ws_channel_enabled = (this->config.getPropertyValue(PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER).asPtr<IBoolean>().getValue(False) == True);
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     _wss_channel_enabled = (this->config.getPropertyValue(PROPERTY_ENABLE_WSS_STREAMING_PORT_SERVER).asPtr<IBoolean>().getValue(False) == True);
+#endif
     const bool control_channel_enabled =
         (this->config.getPropertyValue(PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER).asPtr<IBoolean>().getValue(False) == True);
 
     if (!_ws_channel_enabled && !_wss_channel_enabled)
     {
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
         DAQ_THROW_EXCEPTION(InvalidParameterException,
                             "Neither the websocket streaming port nor the TLS streaming port is enabled");
+#else
+        DAQ_THROW_EXCEPTION(InvalidParameterException,
+                            "The websocket streaming port is not enabled");
+#endif
     }
 
     if (control_channel_enabled && !_ws_channel_enabled)
@@ -212,6 +223,8 @@ WsStreamingServer::WsStreamingServer(
     {
         _server.add_listener(config.getPropertyValue(PROPERTY_WS_CONTROL_PORT_SERVER), true);
     }
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
 
     if (_wss_channel_enabled)
     {
@@ -243,6 +256,9 @@ WsStreamingServer::WsStreamingServer(
             DAQ_THROW_EXCEPTION(InvalidParameterException, "Cannot load the TLS secrets: {}", e.what());
         }
     }
+
+#endif
+
     _path = config.getPropertyValue(PROPERTY_PATH_SERVER).asPtr<IString>().toStdString();
 
     _onClientConnected = _server.on_client_connected.connect(
@@ -301,6 +317,8 @@ ListPtr<IPropertyObject> WsStreamingServer::getDiscoveryConfigs()
         discoveryConfigs.pushBack(std::move(discoveryConfig));
     }
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+
     if (_wss_channel_enabled)
     {
         auto discoveryConfig = PropertyObject();
@@ -312,6 +330,8 @@ ListPtr<IPropertyObject> WsStreamingServer::getDiscoveryConfigs()
 
         discoveryConfigs.pushBack(std::move(discoveryConfig));
     }
+
+#endif
     return discoveryConfigs;
 }
 
@@ -380,6 +400,8 @@ void WsStreamingServer::addCapability()
         info.asPtr<IDeviceInfoInternal>(true).addServerCapability(cap);
     }
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+
     if (_wss_channel_enabled)
     {
         auto cap = ServerCapability(CONST_LTS_STREAMING_ID, CONST_LTS_STREAMING_ID, ProtocolType::Streaming);
@@ -390,6 +412,8 @@ void WsStreamingServer::addCapability()
         cap.setConnectionType("TCP/IP");
         info.asPtr<IDeviceInfoInternal>(true).addServerCapability(cap);
     }
+
+#endif
 
     _capability_added = _ws_channel_enabled || _wss_channel_enabled;
 }

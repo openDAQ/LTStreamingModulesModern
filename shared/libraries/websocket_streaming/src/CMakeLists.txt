@@ -51,6 +51,10 @@ target_link_libraries(${LIB_NAME}
         ws-streaming::ws-streaming
 )
 
+if (${REPO_OPTION_PREFIX}_ENABLE_TLS)
+    target_compile_definitions(${LIB_NAME} PUBLIC ${REPO_OPTION_PREFIX}_ENABLE_TLS)
+endif()
+
 if (MSVC)
     target_compile_options(${LIB_NAME} PRIVATE /bigobj)
 endif()

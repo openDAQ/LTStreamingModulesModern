@@ -1,121 +1,4 @@
-#include <testutils/testutils.h>
-#include <websocket_streaming_client_module/module_dll.h>
-#include <websocket_streaming_client_module/version.h>
-#include <websocket_streaming_client_module/websocket_streaming_client_module_impl.h>
-#include <websocket_streaming/constants.h>
-#include <websocket_streaming/ws_streaming.h>
-
-#include <opendaq/module_ptr.h>
-#include <coretypes/common.h>
-
-#include <algorithm>
-#include <string>
-#include <vector>
-
-#include <opendaq/context_factory.h>
-#include <opendaq/device_info_factory.h>
-#include <opendaq/address_info_factory.h>
-#include <coreobjects/property_factory.h>
-#include <coreobjects/property_object_factory.h>
-
-using namespace daq;
-using namespace daq::websocket_streaming;
-using namespace daq::modules::websocket_streaming_client_module;
-
-class WebsocketStreamingClientModuleTest : public testing::Test
-{
-protected:
-    using ConnectionParameters = WebsocketStreamingClientModule::ConnectionParameters;
-
-    static StringPtr formConnectionString(const StringPtr& connectionString,
-                                          const PropertyObjectPtr& config,
-                                          ConnectionParameters* outParams = nullptr)
-    {
-        return WebsocketStreamingClientModule::formConnectionString(connectionString, config, outParams);
-    }
-
-    static StringPtr createUrlConnectionString(const StringPtr& host, const IntegerPtr& port, const StringPtr& path)
-    {
-        return WebsocketStreamingClientModule::createUrlConnectionString(false, host, port, path);
-    }
-
-    static StringPtr createUrlConnectionString(bool secureType, const StringPtr& host, const IntegerPtr& port, const StringPtr& path)
-    {
-        return WebsocketStreamingClientModule::createUrlConnectionString(secureType, host, port, path);
-    }
-
-    static bool isSecureConnection(const std::string& connectionString)
-    {
-        return WebsocketStreamingClientModule::isSecureConnection(connectionString);
-    }
-
-    static bool acceptsConnectionParameters(const ModulePtr& module, const StringPtr& connectionString, const PropertyObjectPtr& config)
-    {
-        return reinterpret_cast<WebsocketStreamingClientModule*>(module.getObject())->acceptsConnectionParameters(connectionString, config);
-    }
-
-    static bool acceptsStreamingConnectionParameters(const ModulePtr& module, const StringPtr& connectionString, const PropertyObjectPtr& config)
-    {
-        return reinterpret_cast<WebsocketStreamingClientModule*>(module.getObject())->acceptsStreamingConnectionParameters(connectionString, config);
-    }
-
-    static DeviceInfoPtr populateDiscoveredDevice(const discovery::MdnsDiscoveredDevice& discoveredDevice)
-    {
-        return WebsocketStreamingClientModule::populateDiscoveredDevice(discoveredDevice);
-    }
-
-    static Bool completeServerCapability(const ModulePtr& module,
-                                         const ServerCapabilityPtr& source,
-                                         const ServerCapabilityConfigPtr& target)
-    {
-        return module.completeServerCapability(source, target);
-    }
-
-    static discovery::MdnsDiscoveredDevice makeDiscoveredDevice(const std::string& serviceName,
-                                                                uint32_t servicePort = 7414,
-                                                                const std::unordered_set<std::string>& ipv4 = {"192.168.1.10"},
-                                                                const std::unordered_set<std::string>& ipv6 = {},
-                                                                const std::unordered_map<std::string, std::string>& properties = {})
-    {
-        discovery::MdnsDiscoveredDevice device{};
-        device.serviceName = serviceName;
-        device.servicePort = servicePort;
-        device.ipv4Addresses = ipv4;
-        device.ipv6Addresses = ipv6;
-        device.properties = properties;
-        return device;
-    }
-
-    static ServerCapabilityPtr firstCapability(const DeviceInfoPtr& info)
-    {
-        const auto caps = info.getServerCapabilities();
-        EXPECT_EQ(caps.getCount(), 1u);
-        return caps[0];
-    }
-
-    static ServerCapabilityConfigPtr makeSourceCapability(const std::string& address = "192.168.1.10",
-                                                          const std::string& prefix = "daq.opcua")
-    {
-        auto source = ServerCapability("OpenDAQOPCUA", "OpenDAQOPCUA", ProtocolType::Configuration);
-        source.setConnectionType("TCP/IP");
-        source.setPrefix(String(prefix));
-        source.addAddress(String(address));
-        source.addAddressInfo(AddressInfoBuilder()
-                                  .setAddress(String(address))
-                                  .setReachabilityStatus(AddressReachabilityStatus::Reachable)
-                                  .setType("IPv4")
-                                  .setConnectionString(String(prefix + "://" + address + ":4840"))
-                                  .build());
-        return source;
-    }
-};
-
-static ModulePtr CreateModule()
-{
-    ModulePtr module;
-    createModule(&module, NullContext());
-    return module;
-}
+#include "test_websocket_streaming_client_module.h"
 
 TEST_F(WebsocketStreamingClientModuleTest, CreateModule)
 {
@@ -227,13 +110,18 @@ TEST_F(WebsocketStreamingClientModuleTest, GetAvailableComponentTypes)
 
     DictPtr<IString, IDeviceType> deviceTypes;
     ASSERT_NO_THROW(deviceTypes = module.getAvailableDeviceTypes());
-    ASSERT_EQ(deviceTypes.getCount(), 3u);
     ASSERT_TRUE(deviceTypes.hasKey("OpenDAQLTStreaming"));
     ASSERT_EQ(deviceTypes.get("OpenDAQLTStreaming").getId(), "OpenDAQLTStreaming");
-    ASSERT_TRUE(deviceTypes.hasKey("OpenDAQLTStreamingSecure"));
-    ASSERT_EQ(deviceTypes.get("OpenDAQLTStreamingSecure").getId(), "OpenDAQLTStreamingSecure");
     ASSERT_TRUE(deviceTypes.hasKey("OpenDAQLTStreamingOld"));
     ASSERT_EQ(deviceTypes.get("OpenDAQLTStreamingOld").getId(), "OpenDAQLTStreamingOld");
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+    ASSERT_EQ(deviceTypes.getCount(), 3u);
+    ASSERT_TRUE(deviceTypes.hasKey("OpenDAQLTStreamingSecure"));
+    ASSERT_EQ(deviceTypes.get("OpenDAQLTStreamingSecure").getId(), "OpenDAQLTStreamingSecure");
+#else
+    ASSERT_EQ(deviceTypes.getCount(), 2u);
+    ASSERT_FALSE(deviceTypes.hasKey("OpenDAQLTStreamingSecure"));
+#endif
 
     DictPtr<IString, IServerType> serverTypes;
     ASSERT_NO_THROW(serverTypes = module.getAvailableServerTypes());
@@ -246,12 +134,17 @@ TEST_F(WebsocketStreamingClientModuleTest, GetAvailableStreamingTypes)
 
     DictPtr<IString, IStreamingType> streamingTypes;
     ASSERT_NO_THROW(streamingTypes = module.getAvailableStreamingTypes());
-    ASSERT_EQ(streamingTypes.getCount(), 2u);
 
     ASSERT_TRUE(streamingTypes.hasKey("OpenDAQLTStreaming"));
     ASSERT_EQ(streamingTypes.get("OpenDAQLTStreaming").getId(), "OpenDAQLTStreaming");
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+    ASSERT_EQ(streamingTypes.getCount(), 2u);
     ASSERT_TRUE(streamingTypes.hasKey("OpenDAQLTStreamingSecure"));
     ASSERT_EQ(streamingTypes.get("OpenDAQLTStreamingSecure").getId(), "OpenDAQLTStreamingSecure");
+#else
+    ASSERT_EQ(streamingTypes.getCount(), 1u);
+    ASSERT_FALSE(streamingTypes.hasKey("OpenDAQLTStreamingSecure"));
+#endif
 }
 
 TEST_F(WebsocketStreamingClientModuleTest, CreateFunctionBlockIdNull)
@@ -382,7 +275,11 @@ TEST_F(WebsocketStreamingClientModuleTest, AcceptsAllPrefixes)
 
     ASSERT_TRUE(acceptsConnectionParameters(module, "daq.lt://h", nullptr));
     ASSERT_TRUE(acceptsConnectionParameters(module, "daq.ws://h", nullptr));
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     ASSERT_TRUE(acceptsConnectionParameters(module, "daq.lts://h", nullptr));
+#else
+    ASSERT_FALSE(acceptsConnectionParameters(module, "daq.lts://h", nullptr));
+#endif
 }
 
 TEST_F(WebsocketStreamingClientModuleTest, RejectsForeignPrefixes)
@@ -402,60 +299,12 @@ TEST_F(WebsocketStreamingClientModuleTest, AcceptsStreamingRejectsEmpty)
 
     ASSERT_FALSE(acceptsStreamingConnectionParameters(module, "", nullptr));
     ASSERT_FALSE(acceptsStreamingConnectionParameters(module, nullptr, nullptr));
+    ASSERT_TRUE(acceptsStreamingConnectionParameters(module, "daq.lt://h", nullptr));
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     ASSERT_TRUE(acceptsStreamingConnectionParameters(module, "daq.lts://h", nullptr));
-}
-
-TEST_F(WebsocketStreamingClientModuleTest, SecureStreamingDefaultConfigRejectsEmptyCertKey)
-{
-    auto module = CreateModule();
-    ASSERT_THROW_MSG(module.createStreaming("daq.lts://127.0.0.1:1/", nullptr),
-                     InvalidParameterException,
-                     "TLS certificate or key file path is not configured");
-}
-
-TEST_F(WebsocketStreamingClientModuleTest, SecureStreamingRejectsEmptyCaWithMtlsDisabled)
-{
-    auto module = CreateModule();
-    auto config = module.getAvailableStreamingTypes().get("OpenDAQLTStreamingSecure").createDefaultConfig();
-    config.setPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT, False);
-
-    ASSERT_THROW_MSG(module.createStreaming("daq.lts://127.0.0.1:1/", config),
-                     InvalidParameterException,
-                     "TLS CA certificate file path is not configured");
-}
-
-TEST_F(WebsocketStreamingClientModuleTest, SecureStreamingRejectsEmptyCaWithMtlsEnabled)
-{
-    auto module = CreateModule();
-    auto config = module.getAvailableStreamingTypes().get("OpenDAQLTStreamingSecure").createDefaultConfig();
-    config.setPropertyValue(PROPERTY_WSS_CERT_FILE_PATH_CLIENT, "/tmp/cert.pem");
-    config.setPropertyValue(PROPERTY_WSS_KEY_FILE_PATH_CLIENT, "/tmp/key.pem");
-
-    ASSERT_THROW_MSG(module.createStreaming("daq.lts://127.0.0.1:1/", config),
-                     InvalidParameterException,
-                     "TLS CA certificate file path is not configured");
-}
-
-TEST_F(WebsocketStreamingClientModuleTest, SecureStreamingCompletesNullConfig)
-{
-    // A missing configuration is completed with the secure defaults, so the constructor reaches
-    // the certificate check instead of dereferencing a null configuration object.
-    ASSERT_THROW_MSG((createWithImplementation<IStreaming, WsStreaming>(
-                          String("daq.lts://127.0.0.1:1/"), NullContext(), nullptr)),
-                     InvalidParameterException,
-                     "TLS certificate or key file path is not configured");
-}
-
-TEST_F(WebsocketStreamingClientModuleTest, SecureStreamingCompletesPartialConfig)
-{
-    // A configuration carrying only the port is completed with the missing TLS properties.
-    auto module = CreateModule();
-    auto config = PropertyObject();
-    config.addProperty(IntProperty(PROPERTY_WSS_STREAMING_PORT_CLIENT, DEFAULT_WSS_STREAMING_PORT));
-
-    ASSERT_THROW_MSG(module.createStreaming("daq.lts://127.0.0.1:1/", config),
-                     InvalidParameterException,
-                     "TLS certificate or key file path is not configured");
+#else
+    ASSERT_FALSE(acceptsStreamingConnectionParameters(module, "daq.lts://h", nullptr));
+#endif
 }
 
 TEST_F(WebsocketStreamingClientModuleTest, InsecureStreamingCompletesNullConfig)
@@ -480,57 +329,6 @@ TEST_F(WebsocketStreamingClientModuleTest, DefaultInsecureStreamingConfig)
     ASSERT_EQ(config.getPropertyValue(PROPERTY_WS_STREAMING_PORT_CLIENT), DEFAULT_WS_STREAMING_PORT);
 }
 
-TEST_F(WebsocketStreamingClientModuleTest, DefaultSecureStreamingConfig)
-{
-    auto module = CreateModule();
-    auto config = module.getAvailableStreamingTypes().get("OpenDAQLTStreamingSecure").createDefaultConfig();
-    ASSERT_TRUE(config.assigned());
-
-    ASSERT_EQ(config.getAllProperties().getCount(), 6u);
-
-    ASSERT_TRUE(config.hasProperty(PROPERTY_WSS_STREAMING_PORT_CLIENT));
-    ASSERT_TRUE(config.hasProperty(PROPERTY_VERIFY_SERVER_CERT_CLIENT));
-    ASSERT_TRUE(config.hasProperty(PROPERTY_ENABLE_MTLS_CLIENT));
-    ASSERT_TRUE(config.hasProperty(PROPERTY_WSS_CERT_FILE_PATH_CLIENT));
-    ASSERT_TRUE(config.hasProperty(PROPERTY_WSS_KEY_FILE_PATH_CLIENT));
-    ASSERT_TRUE(config.hasProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT));
-
-    ASSERT_EQ(config.getProperty(PROPERTY_WSS_STREAMING_PORT_CLIENT).getValueType(), CoreType::ctInt);
-    ASSERT_EQ(config.getProperty(PROPERTY_VERIFY_SERVER_CERT_CLIENT).getValueType(), CoreType::ctBool);
-    ASSERT_EQ(config.getProperty(PROPERTY_ENABLE_MTLS_CLIENT).getValueType(), CoreType::ctBool);
-
-    ASSERT_EQ(config.getPropertyValue(PROPERTY_WSS_STREAMING_PORT_CLIENT), DEFAULT_WSS_STREAMING_PORT);
-    ASSERT_EQ(config.getPropertyValue(PROPERTY_VERIFY_SERVER_CERT_CLIENT), DEFAULT_VERIFY_SERVER_CERT);
-    ASSERT_EQ(config.getPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT), DEFAULT_ENABLE_MTLS);
-
-    config.setPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT, True);
-    ASSERT_TRUE(config.getProperty(PROPERTY_ENABLE_MTLS_CLIENT).getVisible());
-    ASSERT_TRUE(config.getProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).getVisible());
-    ASSERT_TRUE(config.getProperty(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).getVisible());
-    ASSERT_TRUE(config.getProperty(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).getVisible());
-    config.setPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT, False);
-    ASSERT_TRUE(config.getProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).getVisible());
-    ASSERT_FALSE(config.getProperty(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).getVisible());
-    ASSERT_FALSE(config.getProperty(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).getVisible());
-
-    // Nothing below the verification switch is meaningful once it is off
-    config.setPropertyValue(PROPERTY_ENABLE_MTLS_CLIENT, True);
-    config.setPropertyValue(PROPERTY_VERIFY_SERVER_CERT_CLIENT, False);
-    ASSERT_TRUE(config.getProperty(PROPERTY_VERIFY_SERVER_CERT_CLIENT).getVisible());
-    ASSERT_FALSE(config.getProperty(PROPERTY_ENABLE_MTLS_CLIENT).getVisible());
-    ASSERT_FALSE(config.getProperty(PROPERTY_WSS_CA_CERT_FILE_PATH_CLIENT).getVisible());
-    ASSERT_FALSE(config.getProperty(PROPERTY_WSS_CERT_FILE_PATH_CLIENT).getVisible());
-    ASSERT_FALSE(config.getProperty(PROPERTY_WSS_KEY_FILE_PATH_CLIENT).getVisible());
-}
-
-TEST_F(WebsocketStreamingClientModuleTest, SecureStreamingWithoutVerificationNeedsNoCa)
-{
-    auto module = CreateModule();
-    auto config = module.getAvailableStreamingTypes().get("OpenDAQLTStreamingSecure").createDefaultConfig();
-    config.setPropertyValue(PROPERTY_VERIFY_SERVER_CERT_CLIENT, False);
-
-    ASSERT_THROW(module.createStreaming("daq.lts://127.0.0.1:1/", config), NotFoundException);
-}
 TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLtService)
 {
     const auto info = populateDiscoveredDevice(makeDiscoveredDevice(CONST_LT_SERVICE_NAME, 7425));
@@ -545,21 +343,6 @@ TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLtService)
     ASSERT_EQ(cap.getPort(), 7425);
     ASSERT_EQ(info.getDeviceType().getId(), CONST_LT_STREAMING_ID);
     ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LT_STREAMING_SECURITY_LVL);
-}
-
-TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLtsService)
-{
-    const auto info = populateDiscoveredDevice(makeDiscoveredDevice(CONST_LTS_SERVICE_NAME, 7435));
-    const auto cap = firstCapability(info);
-
-    ASSERT_EQ(cap.getProtocolId(), CONST_LTS_STREAMING_ID);
-    ASSERT_EQ(cap.getProtocolName(), CONST_LTS_STREAMING_ID);
-    ASSERT_EQ(cap.getPrefix(), CONST_LTS_STREAMING_PREFIX);
-    ASSERT_EQ(cap.getProtocolGroupId(), CONST_LT_PROTOCOL_GROUP_ID);
-    ASSERT_EQ(cap.getProtocolType(), ProtocolType::Streaming);
-    ASSERT_EQ(cap.getPort(), 7435);
-    ASSERT_EQ(info.getDeviceType().getId(), CONST_LTS_STREAMING_ID);
-    ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LTS_STREAMING_SECURITY_LVL);
 }
 
 TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLegacyWsService)
@@ -578,16 +361,6 @@ TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLegacyWsServi
     ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LT_STREAMING_SECURITY_LVL);
 }
 
-TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceSecurityLevel)
-{
-    const auto insecure = populateDiscoveredDevice(makeDiscoveredDevice(CONST_LT_SERVICE_NAME));
-    const auto secure = populateDiscoveredDevice(makeDiscoveredDevice(CONST_LTS_SERVICE_NAME, 7415));
-
-    ASSERT_EQ(firstCapability(insecure).getProtocolSecurityLevel(), CONST_LT_STREAMING_SECURITY_LVL);
-    ASSERT_EQ(firstCapability(secure).getProtocolSecurityLevel(), CONST_LTS_STREAMING_SECURITY_LVL);
-    ASSERT_GT(firstCapability(secure).getProtocolSecurityLevel(), firstCapability(insecure).getProtocolSecurityLevel());
-}
-
 TEST_F(WebsocketStreamingClientModuleTest, CompleteServerCapabilityDefaultPortPerScheme)
 {
     auto module = CreateModule();
@@ -597,10 +370,12 @@ TEST_F(WebsocketStreamingClientModuleTest, CompleteServerCapabilityDefaultPortPe
     ASSERT_TRUE(completeServerCapability(module, makeSourceCapability(), target));
     ASSERT_EQ(target.getPort(), DEFAULT_WS_STREAMING_PORT);
 
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
     auto secureTarget = ServerCapability(CONST_LTS_STREAMING_ID, CONST_LTS_STREAMING_ID, ProtocolType::Streaming);
     secureTarget.setPrefix(CONST_LTS_STREAMING_PREFIX);
     ASSERT_TRUE(completeServerCapability(module, makeSourceCapability(), secureTarget));
     ASSERT_EQ(secureTarget.getPort(), DEFAULT_WSS_STREAMING_PORT);
+#endif
 }
 
 TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceUnknownServiceThrows)
@@ -662,39 +437,35 @@ TEST_F(WebsocketStreamingClientModuleTest, CompleteServerCapabilityAcceptsBothId
 {
     auto module = CreateModule();
 
-    for (const auto& protocolId : {CONST_LT_STREAMING_ID, CONST_LTS_STREAMING_ID})
     {
-        auto target = ServerCapability(protocolId, protocolId, ProtocolType::Streaming);
-        ASSERT_TRUE(completeServerCapability(module, makeSourceCapability(), target)) << protocolId;
+        auto target = ServerCapability(CONST_LT_STREAMING_ID, CONST_LT_STREAMING_ID, ProtocolType::Streaming);
+        ASSERT_TRUE(completeServerCapability(module, makeSourceCapability(), target));
+    }
+
+    {
+        auto target = ServerCapability(CONST_LTS_STREAMING_ID, CONST_LTS_STREAMING_ID, ProtocolType::Streaming);
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+        ASSERT_TRUE(completeServerCapability(module, makeSourceCapability(), target));
+#else
+        ASSERT_FALSE(completeServerCapability(module, makeSourceCapability(), target));
+#endif
     }
 
     auto foreign = ServerCapability("OpenDAQOPCUA", "OpenDAQOPCUA", ProtocolType::Configuration);
     ASSERT_FALSE(completeServerCapability(module, makeSourceCapability(), foreign));
 }
 
-TEST_F(WebsocketStreamingClientModuleTest, CompleteServerCapabilityBuildsString)
-{
-    auto module = CreateModule();
-
-    auto target = ServerCapability(CONST_LTS_STREAMING_ID, CONST_LTS_STREAMING_ID, ProtocolType::Streaming);
-    target.setPrefix(CONST_LTS_STREAMING_PREFIX);
-    target.setPort(7435);
-
-    ASSERT_TRUE(completeServerCapability(module, makeSourceCapability("192.168.1.10", "daq.opcua"), target));
-
-    ASSERT_EQ(target.getConnectionString(), "daq.lts://192.168.1.10:7435");
-    ASSERT_EQ(target.getAddresses().getCount(), 1u);
-    ASSERT_EQ(target.getAddresses()[0], "192.168.1.10");
-}
-
 TEST_F(WebsocketStreamingClientModuleTest, ConstantsMatchPublicIds)
 {
     ASSERT_EQ(WsStreaming::createType().getId(), CONST_LT_STREAMING_ID);
     ASSERT_EQ(WsStreaming::createType().getConnectionStringPrefix(), CONST_LT_STREAMING_PREFIX);
-    ASSERT_EQ(WsStreaming::createSecureType().getId(), CONST_LTS_STREAMING_ID);
-    ASSERT_EQ(WsStreaming::createSecureType().getConnectionStringPrefix(), CONST_LTS_STREAMING_PREFIX);
 
     const auto deviceTypes = CreateModule().getAvailableDeviceTypes();
     ASSERT_EQ(deviceTypes.get(CONST_LT_STREAMING_ID).getConnectionStringPrefix(), CONST_LT_STREAMING_PREFIX);
+
+#if DAQMODULES_LT_STREAMING_ENABLE_TLS
+    ASSERT_EQ(WsStreaming::createSecureType().getId(), CONST_LTS_STREAMING_ID);
+    ASSERT_EQ(WsStreaming::createSecureType().getConnectionStringPrefix(), CONST_LTS_STREAMING_PREFIX);
     ASSERT_EQ(deviceTypes.get(CONST_LTS_STREAMING_ID).getConnectionStringPrefix(), CONST_LTS_STREAMING_PREFIX);
+#endif
 }

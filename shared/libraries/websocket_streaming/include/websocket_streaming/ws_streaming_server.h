@@ -140,6 +140,8 @@ class WsStreamingServer : public Server
         Int _wss_port{0};
         std::string _path;
         bool _ws_channel_enabled{false};
+        // Stays false in a build without the TLS channel: nothing ever sets it, so every
+        // `if (_wss_channel_enabled)` below is dead code the compiler drops.
         bool _wss_channel_enabled{false};
         bool _capability_added{false};
 

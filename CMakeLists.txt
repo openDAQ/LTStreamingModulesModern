@@ -32,12 +32,19 @@ option(${REPO_OPTION_PREFIX}_ENABLE_EXAMPLE_APP "Enable ${REPO_NAME} example app
 option(${REPO_OPTION_PREFIX}_ENABLE_TESTS "Enable ${REPO_NAME} testing" ${PROJECT_IS_TOP_LEVEL})
 option(${REPO_OPTION_PREFIX}_ENABLE_CLIENT "Enable ${REPO_NAME} client module" ${PROJECT_IS_TOP_LEVEL})
 option(${REPO_OPTION_PREFIX}_ENABLE_SERVER "Enable ${REPO_NAME} server module" ${PROJECT_IS_TOP_LEVEL})
+option(${REPO_OPTION_PREFIX}_ENABLE_TLS "Enable ${REPO_NAME} TLS (daq.lts://) streaming channel" ON)
 
 opendaq_common_compile_targets_settings()
 opendaq_setup_compiler_flags(${REPO_OPTION_PREFIX})
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 10)
     add_compile_options(-Wno-unknown-warning-option)
+endif()
+
+if (${REPO_OPTION_PREFIX}_ENABLE_TLS)
+    message(STATUS "TLS streaming channel in ${REPO_NAME} is ENABLED")
+else()
+    message(STATUS "TLS streaming channel in ${REPO_NAME} is DISABLED (no OpenSSL dependency)")
 endif()
 
 if (${REPO_OPTION_PREFIX}_ENABLE_TESTS)
@@ -77,8 +84,9 @@ add_subdirectory(external)
 add_subdirectory(shared)
 add_subdirectory(modules)
 
-# End-to-end integration tests need both modules present
-if (${REPO_OPTION_PREFIX}_ENABLE_TESTS AND ${REPO_OPTION_PREFIX}_ENABLE_CLIENT AND ${REPO_OPTION_PREFIX}_ENABLE_SERVER)
+# End-to-end integration tests need both modules present, and only cover the TLS channel
+if (${REPO_OPTION_PREFIX}_ENABLE_TESTS AND ${REPO_OPTION_PREFIX}_ENABLE_CLIENT
+        AND ${REPO_OPTION_PREFIX}_ENABLE_SERVER AND ${REPO_OPTION_PREFIX}_ENABLE_TLS)
     add_subdirectory(tests)
 endif()
 
