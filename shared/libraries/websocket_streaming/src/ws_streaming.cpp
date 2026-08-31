@@ -307,12 +307,26 @@ void WsStreaming::onRemoteSignalDataReceived(
     if (entry->domainEntry
         && entry->domainEntry->descriptor.assigned())
     {
-        if (entry->domainEntry->descriptor.getRule().assigned()
-            && entry->domainEntry->descriptor.getRule().getType() == DataRuleType::Linear
+        const auto domainRuleType = entry->domainEntry->descriptor.getRule().assigned()
+            ? entry->domainEntry->descriptor.getRule().getType()
+            : DataRuleType::Other;
+
+        // For Linear-rule domain: always reconstruct from the received domainValue offset.
+        // For Explicit-rule domain: with Fix 1 applied in ws-streaming/connection.cpp, the
+        // server now sends a linear_payload for Explicit-rule value signals too, so
+        // domainValue is the correct per-sample hardware timestamp. Use it directly instead
+        // of relying on lastPacket which requires correct ordering of a separate domain-signal
+        // data packet.  Fall back to lastPacket only when domainValue is 0 (i.e., the server
+        // has not yet been updated with Fix 1).
+        const bool shouldCreateNewDomainPacket =
+            (domainRuleType == DataRuleType::Linear || domainRuleType == DataRuleType::Explicit)
+            && domainValue != 0
             && (
                 !entry->domainEntry->lastPacket.assigned()
                 || !entry->domainEntry->lastPacket.getOffset().assigned()
-                || entry->domainEntry->lastPacket.getOffset() != domainValue))
+                || entry->domainEntry->lastPacket.getOffset() != domainValue);
+
+        if (shouldCreateNewDomainPacket)
         {
             domainPacket = DataPacket(
                 entry->domainEntry->descriptor,

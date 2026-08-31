@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HBK <noreply@hbkworld.com>
+Date: Mon, 01 Sep 2026 00:00:00 +0000
+Subject: [PATCH] Fix: propagate per-sample timestamps for Explicit-rule domain signals
+
+For value signals whose domain uses ExplicitDataRule, domain_value (the
+hardware timestamp extracted from the packet offset by WsStreamingListener)
+was silently discarded because the linear domain_table is null for
+Explicit-rule signals.  Add an else-if branch that sends a linear_payload
+carrying the correct domain_value so that the client can reconstruct
+accurate per-sample timestamps without relying on the ordering of a
+separately-delivered domain-signal packet.
+
+See: openDAQ/ws-streaming issue - Explicit-rule domain timestamps lost
+---
+ src/connection.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/connection.cpp b/src/connection.cpp
+index 1000000..2000000 100644
+--- a/src/connection.cpp
++++ b/src/connection.cpp
+@@ -299,6 +299,20 @@ void wss::connection::on_local_signal_data_published(
+         }
+     }
+ 
++    else if (entry->is_explicit && entry->domain_signo != 0 && domain_value != 0)
++    {
++        // For value signals with Explicit-rule domain signals: domain_table is null
++        // (no linear_table is created for Explicit-rule signals), so the if (domain_table)
++        // block above is never entered.  domain_value here is the hardware timestamp for
++        // this sample (supplied by WsStreamingListener as the domain packet's offset).
++        // Forward it as a linear_payload so the client can reconstruct the per-sample
++        // timestamp directly, without depending on the ordering of a separately-sent
++        // domain-signal data packet.
++        detail::streaming_protocol::linear_payload payload;
++        payload.sample_index = boost::endian::native_to_little(entry->value_index);
++        payload.value        = boost::endian::native_to_little(domain_value);
++        _peer->send_data(
++            entry->domain_signo,
++            boost::asio::const_buffer{&payload, sizeof(payload)});
++    }
++
+     _peer->send_data(
+         entry->signo,
+         boost::asio::const_buffer{data, size});

@@ -8,4 +8,5 @@ opendaq_dependency(
     EXPECT_TARGET       ws-streaming::ws-streaming
     PATCH_FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/patches/0001-Fixes-plus.patch
+        ${CMAKE_CURRENT_SOURCE_DIR}/patches/0002-Fix-explicit-domain-timestamp.patch
 )
