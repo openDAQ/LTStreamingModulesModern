@@ -32,6 +32,15 @@ opendaq_prepend_include(${INCLUDE_DIR} SRC_PublicHeaders)
 
 add_library(${LIB_NAME} STATIC ${SRC_Cpp} ${SRC_PublicHeaders})
 add_library(${OPENDAQ_SDK_TARGET_NAMESPACE}::${BASE_NAME} ALIAS ${LIB_NAME})
+# Guarded: the helper only exists when building inside the openDAQ super-build.
+if (COMMAND opendaq_target_pch)
+    opendaq_target_pch(${LIB_NAME} <opendaq/opendaq.h>)
+endif()
+
+if (COMMAND opendaq_target_unity_libs)
+    opendaq_target_unity_libs(${LIB_NAME} BATCH_SIZE 4)
+endif()
+
 
 if(BUILD_64Bit OR BUILD_ARM)
     set_target_properties(${LIB_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)

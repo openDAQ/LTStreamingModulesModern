@@ -17,6 +17,11 @@ target_link_libraries(${TEST_APP} PRIVATE daq::opendaq_test_utils gtest
                                           daq::websocket_streaming
 )
 
+# Guarded: the helper only exists when building inside the openDAQ super-build.
+if (COMMAND opendaq_target_pch)
+    opendaq_target_pch(${TEST_APP} <opendaq/opendaq.h> <gtest/gtest.h>)
+endif()
+
 add_test(NAME ${TEST_APP}
          COMMAND $<TARGET_FILE_NAME:${TEST_APP}>
          WORKING_DIRECTORY $<TARGET_FILE_DIR:${TEST_APP}>
