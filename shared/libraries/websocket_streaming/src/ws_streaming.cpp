@@ -261,6 +261,9 @@ WsStreaming::~WsStreaming()
             entry->onUnsubscribed.disconnect();
         }
 
+        // A pending initial-fetch sweep would otherwise keep the I/O context running until it finishes.
+        initialFetchTimer.cancel();
+
         if (wsConnection)
             wsConnection->close();
     });
