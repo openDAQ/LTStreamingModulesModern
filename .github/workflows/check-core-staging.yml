@@ -18,14 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: openDAQ/openDAQ-CI/.github/actions/resolve-channel@jira/TBBAS-3477-staging-check
+      - uses: openDAQ/openDAQ-CI/.github/actions/resolve-channel@jira/TBBAS-3440-pinned-configs
         id: channel
 
       - name: Read the pinned core ref
         shell: bash
         run: echo "CORE_REF=$(cat opendaq_ref)" >> "$GITHUB_ENV"
 
-      - uses: openDAQ/openDAQ-CI/.github/actions/staging-check@jira/TBBAS-3477-staging-check
+      - uses: openDAQ/openDAQ-CI/.github/actions/staging-check@jira/TBBAS-3440-pinned-configs
         env:
           CHANNEL: ${{ steps.channel.outputs.channel }}
         with:
