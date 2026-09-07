@@ -224,6 +224,17 @@
             "cacheVariables": {
                 "DAQMODULES_LT_STREAMING_ENABLE_TESTS": "ON"
             }
+        },
+        {
+            "name": "stage",
+            "hidden": true,
+            "cacheVariables": {
+                "DAQMODULES_LT_STREAMING_ENABLE_CLIENT": "ON",
+                "DAQMODULES_LT_STREAMING_ENABLE_SERVER": "ON",
+                "DAQMODULES_LT_STREAMING_ENABLE_EXAMPLE_APP": "OFF",
+                "DAQMODULES_LT_STREAMING_ENABLE_TESTS": "OFF",
+                "CPACK_COMPONENTS_ALL": "openDAQ_ws_stream_cl_module_Runtime;openDAQ_ws_stream_srv_module_Runtime"
+            }
         }
     ],
     "testPresets": [
