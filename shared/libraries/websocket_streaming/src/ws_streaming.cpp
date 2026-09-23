@@ -423,6 +423,7 @@ void WsStreaming::subscribeRemoteSignal(const std::string& signalId)
         LOG_I("Found signal, subscribing");
         signalIt->second->ptr->subscribe();
         signalIt->second->isSubscribed = true;
+        signalIt->second->ackPending = true;
     }
 
     else
@@ -446,6 +447,8 @@ void WsStreaming::unsubscribeRemoteSignal(const std::string& signalId)
 
         LOG_I("Found signal, unsubscribing");
         signalIt->second->ptr->unsubscribe();
+        signalIt->second->isSubscribed = false;
+        signalIt->second->ackPending = true;
     }
 
     else
@@ -620,9 +623,10 @@ void WsStreaming::onRemoteSignalSubscribed(std::weak_ptr<WsStreamingRemoteSignal
 
     LOG_I("Signal subscribed: {}", entry->ptr->id());
 
-    if (entry->isPublished)
+    // only an ack answering openDAQ's latest request reaches openDAQ, not those of fetches or replaced requests
+    if (entry->isSubscribed && entry->ackPending)
     {
-        entry->isSubscribed = true;
+        entry->ackPending = false;
         triggerSubscribeAck(entry->ptr->id(), true);
     }
 }
@@ -816,9 +820,6 @@ void WsStreaming::onRemoteSignalDataReceived(
     if (!entry)
         return;
 
-    if (!entry->isSubscribed)
-        return;
-
     DataPacketPtr domainPacket;
     DataPacketPtr packet;
 
@@ -881,9 +882,9 @@ void WsStreaming::onRemoteSignalUnsubscribed(std::weak_ptr<WsStreamingRemoteSign
         entry->ptr->unsubscribe();
     }
 
-    if (entry->isSubscribed)
+    if (!entry->isSubscribed && entry->ackPending)
     {
-        entry->isSubscribed = false;
+        entry->ackPending = false;
         triggerSubscribeAck(entry->ptr->id(), false);
     }
 }

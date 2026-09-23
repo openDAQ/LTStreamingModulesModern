@@ -648,6 +648,38 @@ TEST_F(DeviceCompatibilityTest, DataKeepsFlowingWhenDeviceReordersUnsubscribeAnd
     EXPECT_GT(reader.getAvailableCount(), 0u);
 }
 
+// openDAQ unsubscribes and subscribes again before the device answers; the subscribe must still go out
+TEST_F(DeviceCompatibilityTest, ResubscribeWithinOneRoundTripKeepsDataFlowing)
+{
+    FakeLtPeer::Options options;
+    options.streamData = true;
+    FakeLtPeer peer(options);
+
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+
+    auto reader = buildStreamReader(valueSignal);
+    std::this_thread::sleep_for(500ms);
+
+    // releasing the reader unsubscribes, and the next reader subscribes within the same round trip
+    reader.release();
+    reader = buildStreamReader(valueSignal);
+
+    std::this_thread::sleep_for(1s);
+    if (SizeT count = reader.getAvailableCount(); count > 0)
+    {
+        std::vector<double> values(count);
+        std::vector<std::int64_t> domain(count);
+        reader.readWithDomain(values.data(), domain.data(), &count);
+    }
+
+    std::this_thread::sleep_for(500ms);
+    EXPECT_GT(reader.getAvailableCount(), 0u);
+}
+
 // A remote unsubscribe must end the held fetch subscription; a takeover of it would never get data
 TEST_F(DeviceCompatibilityTest, SubscribeAfterRemoteUnsubscribeSendsNewRequest)
 {
