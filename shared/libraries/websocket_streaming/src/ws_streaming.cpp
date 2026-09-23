@@ -15,7 +15,6 @@
  */
 
 #include <algorithm>
-#include <chrono>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -45,13 +44,6 @@
 using namespace std::placeholders;
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
-
-using FetchState = WsStreamingRemoteSignalEntry::FetchState;
-
-// Initial-fetch retry tuning, measured against a real device (burst metadata <= ~1.1 s; >= 50 ms unsub/sub gap keeps ordering).
-static constexpr unsigned INITIAL_FETCH_MAX_ATTEMPTS = 3;
-static constexpr std::chrono::milliseconds INITIAL_FETCH_TIMEOUT{1500};
-static constexpr std::chrono::milliseconds INITIAL_FETCH_RETRY_DELAY{100};
 
 #if DAQMODULES_LT_STREAMING_ENABLE_TLS
 
@@ -106,7 +98,6 @@ WsStreaming::WsStreaming(
     : Streaming(connectionString, context, true)
     , ioContext{1}
     , wsClient(ioContext.get_executor())
-    , initialFetchTimer(ioContext)
 {
     // NOTE! The 'port' property is not used there. The formed 'connectionString'
     // must contain the port number.
@@ -407,19 +398,6 @@ void WsStreaming::subscribeRemoteSignal(const std::string& signalId)
             return;
         }
 
-        // take over the wire subscription still held by the initial fetch: zero wire traffic
-        if (signalIt->second->fetchState == FetchState::Held)
-        {
-            LOG_I("Found signal, taking over the initial-fetch subscription");
-            signalIt->second->fetchState = FetchState::None;
-            signalIt->second->isSubscribed = true;
-            triggerSubscribeAck(signalId, true);
-
-            if (signalIt->second->descriptor.assigned())
-                emitDescriptorChangedEvents(signalIt->second);
-            return;
-        }
-
         LOG_I("Found signal, subscribing");
         signalIt->second->ptr->subscribe();
         signalIt->second->isSubscribed = true;
@@ -504,115 +482,13 @@ void WsStreaming::onRemoteSignalAvailable(wss::remote_signal_ptr signal)
 
     // a reused entry (a hidden domain signal the device later advertises) needs no new fetch:
     // it is already published, has its metadata, or a fetch is already in flight
-    if (entry->isPublished || entry->descriptor.assigned() || entry->fetchState == FetchState::Fetching)
+    if (entry->isPublished || entry->descriptor.assigned() || entry->fetching)
         return;
 
     // Do not immediately register the new signal with openDAQ. We need its metadata first so
     // we can make an openDAQ descriptor. Do an initial subscribe to get that metadata.
-    entry->fetchState = FetchState::Fetching;
-    entry->fetchAttempts = 1;
+    entry->fetching = true;
     signal->subscribe();
-
-    armInitialFetchSweep();
-}
-
-void WsStreaming::armInitialFetchSweep()
-{
-    if (initialFetchSweepArmed)
-        return;
-
-    initialFetchSweepArmed = true;
-    initialFetchTimer.expires_after(INITIAL_FETCH_TIMEOUT);
-    initialFetchTimer.async_wait(std::bind(&WsStreaming::onInitialFetchSweep, this, _1));
-}
-
-void WsStreaming::onInitialFetchSweep(const boost::system::error_code& ec)
-{
-    if (ec == boost::asio::error::operation_aborted)
-        return;
-
-    bool retrying = false;
-
-    for (const auto& [id, entry] : signals)
-    {
-        if (entry->isPublished)
-        {
-            // release a held fetch subscription only after a full sweep period, clear of app subscribes
-            if (entry->fetchState == FetchState::Held && ++entry->sweeps >= 2)
-            {
-                entry->fetchState = FetchState::None;
-                entry->ptr->unsubscribe();
-            }
-            continue;
-        }
-
-        // deferred entry: metadata arrived but the domain signal hasn't published;
-        // grant at least one full sweep period before dropping the domain link
-        if (entry->descriptor.assigned())
-        {
-            if (++entry->sweeps >= 2)
-                publishSignalEntry(entry);
-            continue;
-        }
-
-        if (entry->fetchState != FetchState::Fetching)
-            continue;
-
-        entry->ptr->unsubscribe();
-
-        if (entry->fetchAttempts >= INITIAL_FETCH_MAX_ATTEMPTS)
-        {
-            LOG_W("No metadata received for signal {}; giving up (without a descriptor the signal cannot be added to openDAQ)", id);
-            entry->fetchState = FetchState::None;
-            entry->fetchAttempts = 0;
-        }
-        else
-        {
-            entry->fetchState = FetchState::AwaitingRetry;
-            ++entry->fetchAttempts;
-            retrying = true;
-        }
-    }
-
-    if (retrying)
-    {
-        // stay marked busy so a new arrival cannot re-arm the timer and cancel this resubscribe
-        initialFetchTimer.expires_after(INITIAL_FETCH_RETRY_DELAY);
-        initialFetchTimer.async_wait(std::bind(&WsStreaming::onInitialFetchResubscribe, this, _1));
-    }
-
-    else
-    {
-        initialFetchSweepArmed = false;
-
-        // signals may still be awaiting metadata or deferred on a domain signal
-        if (anyInitialFetchPending())
-            armInitialFetchSweep();
-    }
-}
-
-void WsStreaming::onInitialFetchResubscribe(const boost::system::error_code& ec)
-{
-    if (ec == boost::asio::error::operation_aborted)
-        return;
-
-    initialFetchSweepArmed = false;
-    bool pending = false;
-
-    for (const auto& [id, entry] : signals)
-    {
-        // an assigned descriptor means metadata already arrived (entry is deferred, not lost)
-        if (entry->fetchState != FetchState::AwaitingRetry || entry->descriptor.assigned())
-            continue;
-
-        entry->fetchState = FetchState::Fetching;
-        entry->ptr->subscribe();
-        pending = true;
-    }
-
-    // also stay armed for fetches that arrived during the retry delay and deferred entries
-    if (pending || anyInitialFetchPending())
-        armInitialFetchSweep();
 }
 
 void WsStreaming::onRemoteSignalSubscribed(std::weak_ptr<WsStreamingRemoteSignalEntry> weakEntry)
@@ -715,28 +591,12 @@ void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSign
         LOG_E("Failed to register signal {} with openDAQ: {}", entry->ptr->id(), ex.what());
     }
 
-    // keep the fetch subscription so an immediate application subscribe can take it over
-    if (entry->fetchState == FetchState::Fetching)
+    // openDAQ's subscribe requests are posted to this thread, so they reach the peer after this unsubscribe
+    if (entry->fetching)
     {
-        entry->fetchState = FetchState::Held;
-        armInitialFetchSweep();
+        entry->fetching = false;
+        entry->ptr->unsubscribe();
     }
-    else
-        entry->fetchState = FetchState::None;
-
-    entry->fetchAttempts = 0;
-    entry->sweeps = 0; // the counter now times the hold instead of the deferral
-}
-
-bool WsStreaming::anyInitialFetchPending() const
-{
-    // deferred entries (descriptor but unpublished) and held fetch subscriptions still need the sweep
-    for (const auto& [id, entry] : signals)
-        if (entry->fetchState == FetchState::Held
-                || (!entry->isPublished && (entry->fetchState == FetchState::Fetching || entry->descriptor.assigned())))
-            return true;
-
-    return false;
 }
 
 std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::resolveDomainEntry(
@@ -858,13 +718,6 @@ void WsStreaming::onRemoteSignalUnsubscribed(std::weak_ptr<WsStreamingRemoteSign
         return;
 
     LOG_I("Signal unsubscribed: {}", entry->ptr->id());
-
-    // a remote unsubscribe ends a held fetch subscription: release it so a later subscribe sends a request
-    if (entry->fetchState == FetchState::Held)
-    {
-        entry->fetchState = FetchState::None;
-        entry->ptr->unsubscribe();
-    }
 
     if (!entry->isSubscribed && entry->ackPending)
     {
