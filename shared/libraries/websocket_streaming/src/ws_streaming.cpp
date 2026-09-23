@@ -666,20 +666,7 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
     if (entry->descriptor.assigned() && entry->isPublished)
         emitDescriptorChangedEvents(entry);
     if (entry->descriptor.assigned() && !entry->isPublished)
-    {
-        // defer until the domain publishes: publishSignalEntry() then publishes this signal too;
-        // if the domain never publishes, the sweep publishes this signal without the domain link
-        if (entry->domainEntry && !entry->domainEntry->isPublished)
-        {
-            LOG_D("Deferring signal {} until its domain signal {} is published",
-                entry->ptr->id(), entry->domainEntry->ptr->id());
-            armInitialFetchSweep();
-        }
-        else
-        {
-            publishSignalEntry(entry);
-        }
-    }
+        publishSignalEntry(entry);
 }
 
 void WsStreaming::emitDescriptorChangedEvents(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry)
@@ -702,12 +689,6 @@ void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSign
 {
     LOG_I("Signal {} is now ready, publishing it", entry->ptr->id());
 
-    if (entry->domainEntry && !entry->domainEntry->isPublished)
-    {
-        LOG_W("Signal {} is published without a link to its domain signal {}, which was never published",
-            entry->ptr->id(), entry->domainEntry->ptr->id());
-    }
-
     entry->isPublished = true;
 
     // a throw from here would escape into the Boost.Asio I/O thread and terminate the process
@@ -718,6 +699,15 @@ void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSign
             entry->ptr,
             entry->domainEntry && entry->domainEntry->isPublished ? entry->domainEntry->ptr : nullptr,
             entry->descriptor);
+
+        // link the published signals that use this one as their domain; the event goes before the link, as
+        // setMirroredDomainSignal() caches the domain descriptor and readers only get events that change it
+        for (const auto& [id, dependent] : signals)
+            if (dependent != entry && dependent->domainEntry == entry && dependent->isPublished)
+            {
+                onPacket(dependent->ptr->id(), DataDescriptorChangedEventPacket(nullptr, entry->descriptor));
+                onDomainSignalChanged(dependent->ptr, entry->ptr);
+            }
     }
 
     catch (const std::exception& ex)
@@ -736,12 +726,6 @@ void WsStreaming::publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSign
 
     entry->fetchAttempts = 0;
     entry->sweeps = 0; // the counter now times the hold instead of the deferral
-
-    // publish signals that were deferred waiting for this signal as their domain
-    for (const auto& [id, dependent] : signals)
-        if (dependent != entry && dependent->domainEntry == entry
-                && !dependent->isPublished && dependent->descriptor.assigned())
-            publishSignalEntry(dependent);
 }
 
 bool WsStreaming::anyInitialFetchPending() const

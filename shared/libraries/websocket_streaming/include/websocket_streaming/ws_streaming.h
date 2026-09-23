@@ -142,7 +142,7 @@ class WsStreaming : public Streaming
          *
          * @param signal The ws-streaming library's remote signal object.
          * @param domainSignal The ws-streaming library's remote signal object for the descriptor,
-         *     or nullptr if there is no associated domain signal.
+         *     or nullptr if there is no associated domain signal or it is not available yet.
          * @param descriptor The openDAQ descriptor for the signal.
          */
         boost::signals2::signal<
@@ -150,6 +150,17 @@ class WsStreaming : public Streaming
                 wss::remote_signal_ptr domainSignal,
                 const DataDescriptorPtr& descriptor)
         > onSignalAvailable;
+
+        /*!
+         * @brief An event raised when an available signal's domain signal becomes available after it.
+         *
+         * @param signal The ws-streaming library's remote signal object.
+         * @param domainSignal The ws-streaming library's remote signal object for the domain signal.
+         */
+        boost::signals2::signal<
+            void(wss::remote_signal_ptr signal,
+                wss::remote_signal_ptr domainSignal)
+        > onDomainSignalChanged;
 
         /**
          * @brief An event raised when a signal is no longer available.
@@ -206,7 +217,7 @@ class WsStreaming : public Streaming
         std::shared_ptr<WsStreamingRemoteSignalEntry> resolveDomainEntry(
             const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 
-        /*! @brief Registers a signal with openDAQ, marks its initial-fetch subscription as held for takeover and publishes signals deferred on it. */
+        /*! @brief Registers a signal with openDAQ, links the published signals that use it as their domain and marks its initial-fetch subscription as held for takeover. */
         void publishSignalEntry(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 
         /*! @brief Pushes the entry's cached descriptor into openDAQ as descriptor-changed events, propagating to signals that use it as their domain. */
