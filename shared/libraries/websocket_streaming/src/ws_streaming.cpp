@@ -523,6 +523,7 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
 
         if (entry->domainEntry)
         {
+            entry->domainEntry->isDomain = true;
             LOG_D("Signal {} domain now points to {}", entry->ptr->id(), entry->domainEntry->ptr->id());
         }
         else
@@ -662,6 +663,11 @@ void WsStreaming::onRemoteSignalDataReceived(
 {
     auto entry = weakEntry.lock();
     if (!entry)
+        return;
+
+    // readers get only the data of openDAQ's acknowledged subscribe: the fetch's data, or data from before a resubscribe
+    // took effect, would reach them as a domain gap; domain signals, which openDAQ does not subscribe, feed their dependents
+    if (!entry->descriptor.assigned() || (!entry->isDomain && (!entry->isSubscribed || entry->ackPending)))
         return;
 
     DataPacketPtr domainPacket;
