@@ -28,15 +28,6 @@ BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
 
 struct WsStreamingRemoteSignalEntry
 {
-    /** The lifecycle of the initial metadata-fetch subscription (see the WsStreaming class doc). */
-    enum class FetchState
-    {
-        None,           /**< No fetch subscription exists: never fetched, given up, released or taken over. */
-        Fetching,       /**< A fetch wire subscription is active, awaiting the signal's metadata. */
-        AwaitingRetry,  /**< The sweep unsubscribed a fetch that yielded no metadata; a retry subscribe is due. */
-        Held,           /**< Published, but the fetch subscription is kept for an application subscribe to take over. */
-    };
-
     /**
      * The ws-streaming library's remote signal object. This object is created by ws-streaming
      * when the remote peer advertises a signal as 'available'. It is released (but not
@@ -73,10 +64,7 @@ struct WsStreamingRemoteSignalEntry
     bool isPublished = false;
     bool isSubscribed = false;  /**< openDAQ's latest request: subscribe or unsubscribe. */
     bool ackPending = false;    /**< The device has not yet acknowledged openDAQ's latest request. */
-
-    FetchState fetchState = FetchState::None;   /**< State of the initial metadata-fetch subscription. */
-    unsigned fetchAttempts = 0;                 /**< Subscribe requests sent by the initial metadata fetch. */
-    unsigned sweeps = 0;                        /**< Sweep passes in the current wait (deferral before publication, hold after); the wait ends at 2. */
+    bool fetching = false;      /**< The subscription that fetches the signal's metadata is open. */
 };
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING

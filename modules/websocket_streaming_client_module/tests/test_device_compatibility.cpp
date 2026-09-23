@@ -1,25 +1,28 @@
-﻿/*
+/*
  * End-to-end tests for the streaming client against a fake LT peer that mimics devices which
  * do not advertise their time signals ("hidden" domain signals referenced via "relatedSignals"
  * with an abstract table id) and which may drop or reorder command-interface requests.
  *
  * The fake peer accepts a WebSocket upgrade on a raw TCP socket (the client only checks the
  * HTTP status line) and then speaks the LT streaming protocol through the ws-streaming
- * library's own low-level peer class, with full control over metadata content, ordering and
- * request handling.
+ * library's own low-level peer class, with full control over metadata content and ordering.
+ * Like the digiBOX-WT, it takes subscribe and unsubscribe requests on an HTTP command interface
+ * ("jsonrpc-http"), one request per connection, and runs the requests that are in flight at the
+ * same time last-first.
  */
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
-#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <boost/asio/io_context.hpp>
@@ -29,6 +32,9 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/streambuf.hpp>
 #include <boost/asio/write.hpp>
+#include <boost/beast/core/flat_buffer.hpp>
+#include <boost/beast/core/tcp_stream.hpp>
+#include <boost/beast/http.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -60,17 +66,19 @@ class FakeLtPeer
             bool timeMetadataBeforeValue = true;    // send the time signal's metadata before the value signal's
             std::chrono::milliseconds timeMetadataDelay{0};  // extra delay before the time signal's metadata
             bool withholdTimeMetadata = false;      // announce the time signal but never send its metadata
-            unsigned dropSubscribeRequests = 0;     // ignore this many leading value-signal subscribe requests
+            unsigned dropSubscribeRequests = 0;     // close this many leading value-signal subscribe requests unanswered
             bool streamData = false;                // stream value-signal data while it is subscribed
-            bool outOfOrderUnsubscribe = false;     // defer a value-signal unsubscribe behind the next request
         };
 
         explicit FakeLtPeer(Options options)
             : options(options)
             , acceptor(ioc, boost::asio::ip::tcp::endpoint(
                 boost::asio::ip::make_address("127.0.0.1"), 0))
+            , httpAcceptor(ioc, boost::asio::ip::tcp::endpoint(
+                boost::asio::ip::make_address("127.0.0.1"), 0))
             , timer(ioc)
             , dataTimer(ioc)
+            , inFlightTimer(ioc)
         {
             acceptor.async_accept(
                 [this](const boost::system::error_code& ec, boost::asio::ip::tcp::socket socket)
@@ -78,6 +86,8 @@ class FakeLtPeer
                     if (!ec)
                         handleAccept(std::move(socket));
                 });
+
+            acceptHttp();
 
             thread = std::thread([this] { ioc.run(); });
         }
@@ -111,19 +121,6 @@ class FakeLtPeer
             return valueUnsubscribeRequests;
         }
 
-        // Unilaterally ends the value-signal subscription, like a device dropping it on its own
-        void unsubscribeValueSignal()
-        {
-            boost::asio::post(ioc,
-                [this]
-                {
-                    if (!peer)
-                        return;
-                    valueSubscribed = false;
-                    peer->send_metadata(valueSigno, "unsubscribe", nlohmann::json::object());
-                });
-        }
-
         // Advertises the previously hidden time signal in a second 'available' announcement
         void advertiseTimeSignal()
         {
@@ -136,6 +133,12 @@ class FakeLtPeer
         }
 
     private:
+
+        struct InFlightRequest
+        {
+            std::shared_ptr<boost::beast::tcp_stream> stream;
+            nlohmann::json body;
+        };
 
         void handleAccept(boost::asio::ip::tcp::socket socket)
         {
@@ -168,35 +171,93 @@ class FakeLtPeer
         void startPeer(boost::asio::ip::tcp::socket socket)
         {
             peer = std::make_shared<wss::detail::peer>(std::move(socket), false);
-
-            onMetadata = peer->on_metadata_received.connect(
-                [this](unsigned signo, const std::string& method, const nlohmann::json& params)
-                {
-                    handleMetadata(signo, method, params);
-                });
-
             peer->run();
 
             peer->send_metadata(0, "apiVersion", {{ "version", "1.0.0" }});
             peer->send_metadata(0, "init", {
                 { "streamId", "FAKE" },
-                { "commandInterfaces", { { "jsonrpc", nlohmann::json::object() } } },
+                { "commandInterfaces", { { "jsonrpc-http", {
+                    { "httpMethod", "POST" },
+                    { "httpPath", "/" },
+                    { "httpVersion", "1.1" },
+                    { "port", httpAcceptor.local_endpoint().port() },
+                } } } },
             });
             peer->send_metadata(0, "available", {{ "signalIds", { valueSignalId } }});
         }
 
-        void handleMetadata(unsigned /*signo*/, const std::string& method, const nlohmann::json& params)
+        void acceptHttp()
         {
-            if (method != "request" || !params.is_object())
-                return;
+            httpAcceptor.async_accept(
+                [this](const boost::system::error_code& ec, boost::asio::ip::tcp::socket socket)
+                {
+                    if (ec)
+                        return;
 
-            const auto id = params.value<nlohmann::json>("id", nullptr);
-            const std::string rpcMethod = params.value("method", std::string());
+                    readHttp(std::make_shared<boost::beast::tcp_stream>(std::move(socket)));
+                    acceptHttp();
+                });
+        }
+
+        void readHttp(std::shared_ptr<boost::beast::tcp_stream> stream)
+        {
+            auto buffer = std::make_shared<boost::beast::flat_buffer>();
+            auto request = std::make_shared<boost::beast::http::request<boost::beast::http::string_body>>();
+
+            boost::beast::http::async_read(*stream, *buffer, *request,
+                [this, stream, buffer, request](const boost::system::error_code& ec, std::size_t)
+                {
+                    if (ec)
+                        return;
+
+                    // requests arriving within 20 ms of each other are in flight together
+                    inFlight.push_back({ stream, nlohmann::json::parse(request->body(), nullptr, false) });
+                    inFlightTimer.expires_after(20ms);
+                    inFlightTimer.async_wait(
+                        [this](const boost::system::error_code& ec)
+                        {
+                            if (!ec)
+                                runInFlightRequests();
+                        });
+                });
+        }
+
+        // Runs the requests in flight last-first, as the digiBOX-WT ran them on 2026-08-14
+        void runInFlightRequests()
+        {
+            auto requests = std::exchange(inFlight, {});
+
+            for (auto it = requests.rbegin(); it != requests.rend(); ++it)
+            {
+                // a dropped request's connection closes unanswered with its last reference
+                auto result = runRequest(it->body);
+                if (!result)
+                    continue;
+
+                auto response = std::make_shared<boost::beast::http::response<boost::beast::http::string_body>>(
+                    boost::beast::http::status::ok, 11);
+                response->set(boost::beast::http::field::content_type, "application/json");
+                response->body() = result->dump();
+                response->prepare_payload();
+
+                boost::beast::http::async_write(*it->stream, *response,
+                    [stream = it->stream, response](const boost::system::error_code&, std::size_t) {});
+            }
+        }
+
+        // Runs a JSON-RPC request before answering it, like the device; nothing means the request is dropped
+        std::optional<nlohmann::json> runRequest(const nlohmann::json& request)
+        {
+            if (!request.is_object())
+                return std::nullopt;
+
+            const auto id = request.value<nlohmann::json>("id", nullptr);
+            const std::string rpcMethod = request.value("method", std::string());
 
             std::string signalId;
-            if (params.contains("params") && params["params"].is_array()
-                    && !params["params"].empty() && params["params"][0].is_string())
-                signalId = params["params"][0];
+            if (request.contains("params") && request["params"].is_array()
+                    && !request["params"].empty() && request["params"][0].is_string())
+                signalId = request["params"][0];
 
             if (rpcMethod == "FAKE.subscribe" && signalId == valueSignalId)
             {
@@ -204,19 +265,14 @@ class FakeLtPeer
                     std::scoped_lock lock(mutex);
                     ++valueSubscribeRequests;
                     if (valueSubscribeRequests <= options.dropSubscribeRequests)
-                        return;  // simulate a dropped request: no response, no effect
+                        return std::nullopt;
                 }
 
-                // a subscribe processed while still subscribed is rejected, then the deferred unsubscribe runs
-                if (valueSubscribed && options.outOfOrderUnsubscribe)
-                {
-                    respondError(id);
-                    flushPendingValueUnsubscribe();
-                    return;
-                }
+                // a subscribe of a subscribed signal is rejected, and the data keeps flowing
+                if (valueSubscribed)
+                    return error(id);
 
                 valueSubscribed = true;
-                respond(id, true);
                 sendValueSignalFamily();
 
                 if (options.streamData)
@@ -229,58 +285,31 @@ class FakeLtPeer
                 ++timeSubscribeRequests;
             }
 
-            else if (rpcMethod == "FAKE.unsubscribe")
+            else if (rpcMethod == "FAKE.unsubscribe" && signalId == valueSignalId)
             {
-                if (signalId == valueSignalId)
                 {
-                    if (options.outOfOrderUnsubscribe)
-                        pendingValueUnsubscribeId = id;  // sit on it until the next request
-                    else
-                        executeValueUnsubscribe(id);
-                    return;
+                    std::scoped_lock lock(mutex);
+                    ++valueUnsubscribeRequests;
                 }
 
-                respond(id, true);
-            }
-        }
-
-        void executeValueUnsubscribe(const nlohmann::json& id)
-        {
-            {
-                std::scoped_lock lock(mutex);
-                ++valueUnsubscribeRequests;
+                valueSubscribed = false;
+                peer->send_metadata(valueSigno, "unsubscribe", nlohmann::json::object());
             }
 
-            valueSubscribed = false;
-            respond(id, true);
-            peer->send_metadata(valueSigno, "unsubscribe", nlohmann::json::object());
-        }
-
-        void flushPendingValueUnsubscribe()
-        {
-            if (!pendingValueUnsubscribeId)
-                return;
-
-            executeValueUnsubscribe(*pendingValueUnsubscribeId);
-            pendingValueUnsubscribeId.reset();
-        }
-
-        void respond(const nlohmann::json& id, bool result)
-        {
-            peer->send_metadata(0, "response", {
+            return nlohmann::json{
                 { "jsonrpc", "2.0" },
                 { "id", id },
-                { "result", result },
-            });
+                { "result", true },
+            };
         }
 
-        void respondError(const nlohmann::json& id)
+        static nlohmann::json error(const nlohmann::json& id)
         {
-            peer->send_metadata(0, "response", {
+            return {
                 { "jsonrpc", "2.0" },
                 { "id", id },
                 { "error", { { "code", -32602 }, { "message", "already subscribed" } } },
-            });
+            };
         }
 
         void startStreamingData()
@@ -380,19 +409,20 @@ class FakeLtPeer
 
         boost::asio::io_context ioc{1};
         boost::asio::ip::tcp::acceptor acceptor;
+        boost::asio::ip::tcp::acceptor httpAcceptor;
         boost::asio::steady_timer timer;
         boost::asio::steady_timer dataTimer;
+        boost::asio::steady_timer inFlightTimer;
         std::thread thread;
 
         // sent by reference from the asynchronous send_data(), so they must outlive the calls
         const wss::detail::streaming_protocol::linear_payload timeStart{0, 0};
         const std::vector<float> valueSamples = std::vector<float>(100, 1.0f);
 
-        bool valueSubscribed = false;  // only touched on the ioc thread
-        std::optional<nlohmann::json> pendingValueUnsubscribeId;
+        bool valueSubscribed = false;           // only touched on the ioc thread
+        std::vector<InFlightRequest> inFlight;  // only touched on the ioc thread
 
         std::shared_ptr<wss::detail::peer> peer;
-        boost::signals2::scoped_connection onMetadata;
 
         std::mutex mutex;
         unsigned valueSubscribeRequests = 0;
@@ -443,6 +473,22 @@ SignalPtr findSignalByName(const ListPtr<ISignal>& signals, const std::string& n
     for (const auto& signal : signals)
         if (signal.getDescriptor().assigned() && signal.getDescriptor().getName() == name)
             return signal;
+    return nullptr;
+}
+
+// Returns the signal the moment it appears, like an application that subscribes every new signal
+// on sight (lt_race polls every millisecond, 2026-08-19)
+SignalPtr waitForSignal(const DevicePtr& device, const std::string& name, std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+    do
+    {
+        if (auto signal = findSignalByName(device.getSignals(search::Recursive(search::Any())), name); signal.assigned())
+            return signal;
+        std::this_thread::sleep_for(1ms);
+    } while (std::chrono::steady_clock::now() < deadline);
+
     return nullptr;
 }
 
@@ -578,10 +624,10 @@ TEST_F(DeviceCompatibilityTest, DroppedSubscribeRequestIsRetried)
 
     FakeLtPeer peer(options);
 
-    // the sweep timer retries after 1.5 s + 100 ms; allow generous margin
-    auto [instance, device, signals] = connectAndWaitForSignals(peer, 2, 10s);
+    // ws-streaming sends a request that got no answer once more
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
-    ASSERT_GE(peer.subscribeRequestCount(), 2u);
+    ASSERT_EQ(peer.subscribeRequestCount(), 2u);
 
     auto valueSignal = findSignalByName(signals, "CH1.value");
     ASSERT_TRUE(valueSignal.assigned());
@@ -609,53 +655,53 @@ TEST_F(DeviceCompatibilityTest, ReadvertisedHiddenDomainSignalStartsNoNewFetch)
     ASSERT_EQ(peer.timeSubscribeRequestCount(), 0u);
 }
 
-TEST_F(DeviceCompatibilityTest, ImmediateSubscribeTakesOverFetchSubscription)
+// The device's ack of the fetch subscription's release must not be taken for an answer to the application
+TEST_F(DeviceCompatibilityTest, ImmediateSubscribeGetsOneSubscribeAck)
 {
     FakeLtPeer peer({});
-    auto [instance, device, signals] = connectAndWaitForSignals(peer);
-    ASSERT_EQ(signals.getCount(), 2u);
 
-    auto valueSignal = findSignalByName(signals, "CH1.value");
+    std::atomic<unsigned> subscribeAcks{0};
+    std::atomic<unsigned> unsubscribeAcks{0};
+
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
+
+    // subscribe the moment the signal appears, while the release of its fetch subscription is in flight
+    auto valueSignal = waitForSignal(device, "CH1.value", 5s);
     ASSERT_TRUE(valueSignal.assigned());
 
-    // subscribe immediately after the signal appeared, like an auto-subscribing application
     auto mirrored = valueSignal.asPtr<IMirroredSignalConfig>();
-    std::promise<void> ackPromise;
-    auto ackFuture = ackPromise.get_future();
     mirrored.getOnSubscribeComplete() +=
-        [&ackPromise](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr&) { ackPromise.set_value(); };
+        [&subscribeAcks](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr&) { ++subscribeAcks; };
+    mirrored.getOnUnsubscribeComplete() +=
+        [&unsubscribeAcks](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr&) { ++unsubscribeAcks; };
 
     auto reader = buildStreamReader(valueSignal);
+    std::this_thread::sleep_for(1s);
 
-    // the takeover must acknowledge the subscription without any wire traffic
-    ASSERT_EQ(ackFuture.wait_for(3s), std::future_status::ready);
-
-    // give the sweep time to have (wrongly) released the fetch subscription
-    std::this_thread::sleep_for(4s);
-
-    EXPECT_EQ(peer.subscribeRequestCount(), 1u);         // only the initial fetch subscribed
-    EXPECT_EQ(peer.valueUnsubscribeRequestCount(), 0u);  // never released: taken over
+    EXPECT_EQ(subscribeAcks.load(), 1u);
+    EXPECT_EQ(unsubscribeAcks.load(), 0u);
+    EXPECT_EQ(peer.subscribeRequestCount(), 2u);         // the fetch, then the application
+    EXPECT_EQ(peer.valueUnsubscribeRequestCount(), 1u);  // the release of the fetch subscription
 }
 
-// Without the takeover, a device swapping the release unsubscribe with the app subscribe stops the data
+// A device running the fetch subscription's release and an immediate subscribe last-first stops the data
 TEST_F(DeviceCompatibilityTest, DataKeepsFlowingWhenDeviceReordersUnsubscribeAndSubscribe)
 {
     FakeLtPeer::Options options;
     options.streamData = true;
-    options.outOfOrderUnsubscribe = true;
     FakeLtPeer peer(options);
 
-    auto [instance, device, signals] = connectAndWaitForSignals(peer);
-    ASSERT_EQ(signals.getCount(), 2u);
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
 
-    auto valueSignal = findSignalByName(signals, "CH1.value");
+    // subscribe the moment the signal appears, while the release of its fetch subscription is in flight
+    auto valueSignal = waitForSignal(device, "CH1.value", 5s);
     ASSERT_TRUE(valueSignal.assigned());
-
-    // subscribe immediately after the signal appeared, like an auto-subscribing application
     auto reader = buildStreamReader(valueSignal);
 
-    // wait past the sweep window and discard the startup burst (the failure mode goes silent after it)
-    std::this_thread::sleep_for(4s);
+    // discard the startup burst; the failure mode goes silent after it
+    std::this_thread::sleep_for(1s);
 
     if (SizeT count = reader.getAvailableCount(); count > 0)
     {
@@ -700,38 +746,14 @@ TEST_F(DeviceCompatibilityTest, ResubscribeWithinOneRoundTripKeepsDataFlowing)
     EXPECT_GT(reader.getAvailableCount(), 0u);
 }
 
-// A remote unsubscribe must end the held fetch subscription; a takeover of it would never get data
-TEST_F(DeviceCompatibilityTest, SubscribeAfterRemoteUnsubscribeSendsNewRequest)
-{
-    FakeLtPeer::Options options;
-    options.streamData = true;
-    FakeLtPeer peer(options);
-
-    auto [instance, device, signals] = connectAndWaitForSignals(peer);
-    ASSERT_EQ(signals.getCount(), 2u);
-
-    // the device drops the subscription on its own while it is held for takeover
-    peer.unsubscribeValueSignal();
-    std::this_thread::sleep_for(500ms);
-
-    auto valueSignal = findSignalByName(signals, "CH1.value");
-    ASSERT_TRUE(valueSignal.assigned());
-
-    auto reader = buildStreamReader(valueSignal);
-
-    std::this_thread::sleep_for(1s);
-    EXPECT_EQ(peer.subscribeRequestCount(), 2u);  // a real second subscribe request was sent
-    EXPECT_GT(reader.getAvailableCount(), 0u);    // and data flows again
-}
-
-TEST_F(DeviceCompatibilityTest, UnusedFetchSubscriptionIsReleasedBySweep)
+TEST_F(DeviceCompatibilityTest, FetchSubscriptionEndsAtPublication)
 {
     FakeLtPeer peer({});
     auto [instance, device, signals] = connectAndWaitForSignals(peer);
     ASSERT_EQ(signals.getCount(), 2u);
 
-    // nobody subscribes: the sweep must release the held fetch subscription
-    std::this_thread::sleep_for(4s);
+    // nobody subscribes: the fetch subscription ended with the signal's publication
+    std::this_thread::sleep_for(500ms);
 
     EXPECT_EQ(peer.subscribeRequestCount(), 1u);
     EXPECT_EQ(peer.valueUnsubscribeRequestCount(), 1u);
