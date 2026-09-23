@@ -71,7 +71,8 @@ struct WsStreamingRemoteSignalEntry
     boost::signals2::scoped_connection onUnsubscribed;      /**< An RAII tracker for the connection to the signal object's `on_unsubscribed` event. */
 
     bool isPublished = false;
-    bool isSubscribed = false;
+    bool isSubscribed = false;  /**< openDAQ's latest request: subscribe or unsubscribe. */
+    bool ackPending = false;    /**< The device has not yet acknowledged openDAQ's latest request. */
 
     FetchState fetchState = FetchState::None;   /**< State of the initial metadata-fetch subscription. */
     unsigned fetchAttempts = 0;                 /**< Subscribe requests sent by the initial metadata fetch. */
