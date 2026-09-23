@@ -70,6 +70,7 @@ class FakeLtPeer
             bool streamData = false;                // stream value-signal data while it is subscribed
             std::chrono::milliseconds runDelay{20}; // time to run a request; requests arriving within it are in flight together
             bool rejectValueMetadata = false;       // give the value signal a tick resolution the client rejects
+            bool timeSubscribeWithMetadata = false; // first mention the time signal with its metadata, not with the value's subscribe
         };
 
         explicit FakeLtPeer(Options options)
@@ -349,7 +350,8 @@ class FakeLtPeer
         {
             // subscribing the value signal implicitly announces its hidden time signal
             peer->send_metadata(valueSigno, "subscribe", {{ "signalId", valueSignalId }});
-            peer->send_metadata(timeSigno, "subscribe", {{ "signalId", timeSignalId }});
+            if (!options.timeSubscribeWithMetadata)
+                peer->send_metadata(timeSigno, "subscribe", {{ "signalId", timeSignalId }});
 
             if (options.timeMetadataBeforeValue)
             {
@@ -402,6 +404,9 @@ class FakeLtPeer
         {
             if (options.withholdTimeMetadata)
                 return;
+
+            if (options.timeSubscribeWithMetadata)
+                peer->send_metadata(timeSigno, "subscribe", {{ "signalId", timeSignalId }});
 
             peer->send_metadata(timeSigno, "signal", {
                 { "tableId", tableId },
@@ -634,6 +639,33 @@ TEST_F(DeviceCompatibilityTest, DomainMetadataArrivingLateIsStillLinked)
 
     ASSERT_TRUE(domainDescriptor.assigned());
     ASSERT_EQ(domainDescriptor.getName(), "CH1.time");
+}
+
+// The value signal publishes before the device mentions its time signal; its next metadata finds the time signal
+TEST_F(DeviceCompatibilityTest, HiddenDomainFoundAfterPublicationIsLinked)
+{
+    FakeLtPeer::Options options;
+    options.timeMetadataBeforeValue = false;
+    options.timeMetadataDelay = 300ms;
+    options.timeSubscribeWithMetadata = true;
+    FakeLtPeer peer(options);
+
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 1);
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_FALSE(valueSignal.getDomainSignal().assigned());
+
+    // once the device has mentioned the time signal, a subscribe brings the value signal's metadata again
+    std::this_thread::sleep_for(500ms);
+    auto reader = PacketReader(valueSignal);
+
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!valueSignal.getDomainSignal().assigned() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(50ms);
+
+    ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
+    ASSERT_EQ(valueSignal.getDomainSignal(),
+        findSignalByName(device.getSignals(search::Recursive(search::Any())), "CH1.time"));
 }
 
 TEST_F(DeviceCompatibilityTest, DroppedSubscribeRequestIsRetried)
