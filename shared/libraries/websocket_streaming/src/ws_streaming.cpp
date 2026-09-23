@@ -114,12 +114,12 @@ WsStreaming::WsStreaming(
     // The ws-streaming library wants a URL like ws://1.2.3.4:7418/foo.
     // So we simply need to replace the daq.lt:// prefix with ws://
     // and daq.lts:// with wss:// for secure channel
-    auto wsConnectionString = connectionString.toStdString();
+    wsConnectionString = connectionString.toStdString();
     boost::replace_all(wsConnectionString, "daq.lt://", "ws://");
     boost::replace_all(wsConnectionString, "daq.ws://", "ws://");
     boost::replace_all(wsConnectionString, "daq.lts://", "wss://");
     boost::replace_all(wsConnectionString, "daq.wss://", "wss://");
-    bool isSecureChannel = wsConnectionString.find("wss://") != std::string::npos;
+    isSecureChannel = wsConnectionString.find("wss://") != std::string::npos;
 
 #if !DAQMODULES_LT_STREAMING_ENABLE_TLS
     if (isSecureChannel)
@@ -192,7 +192,10 @@ WsStreaming::WsStreaming(
     }
 
 #endif
+}
 
+void WsStreaming::connect()
+{
     // Start the ws-streaming connection attempt.
     LOG_I("Connecting to {}", wsConnectionString);
     wsClient.async_connect(wsConnectionString,
@@ -240,6 +243,10 @@ WsStreaming::WsStreaming(
 
 WsStreaming::~WsStreaming()
 {
+    // not connected, or the connection attempt failed and already stopped the thread
+    if (!thread.joinable())
+        return;
+
     LOG_I("Closing streaming connection and stopping Boost.Asio I/O context thread");
 
     // Tear the connection down on the I/O context's thread. The ws-streaming peer is not thread-safe,

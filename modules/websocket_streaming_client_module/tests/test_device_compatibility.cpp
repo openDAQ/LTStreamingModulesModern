@@ -9,6 +9,7 @@
  * request handling.
  */
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -35,6 +36,7 @@
 #include <ws-streaming/detail/streaming_protocol.hpp>
 
 #include <testutils/testutils.h>
+#include <websocket_streaming/ws_streaming.h>
 #include <websocket_streaming_client_module/module_dll.h>
 
 #include <opendaq/context_factory.h>
@@ -477,6 +479,45 @@ auto buildStreamReader(const SignalPtr& signal)
 }  // namespace
 
 using DeviceCompatibilityTest = testing::Test;
+
+TEST_F(DeviceCompatibilityTest, HandlerConnectedLateGetsEverySignal)
+{
+    FakeLtPeer peer({});
+
+    std::mutex mutex;
+    std::vector<std::string> signalIds;
+
+    auto streaming = createWithImplementation<IStreaming, websocket_streaming::WsStreaming>(
+        String("daq.lt://127.0.0.1:" + std::to_string(peer.port()) + "/"), NullContext(), nullptr);
+    auto& wsStreaming = *reinterpret_cast<websocket_streaming::WsStreaming*>(streaming.getObject());
+
+    // a creator under load connects its handler well after construction
+    std::this_thread::sleep_for(200ms);
+
+    boost::signals2::scoped_connection onAvailable = wsStreaming.onSignalAvailable.connect(
+        [&](wss::remote_signal_ptr signal, wss::remote_signal_ptr, const DataDescriptorPtr&)
+        {
+            std::scoped_lock lock(mutex);
+            signalIds.push_back(signal->id());
+        });
+
+    wsStreaming.connect();
+
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        {
+            std::scoped_lock lock(mutex);
+            if (signalIds.size() >= 2)
+                break;
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+
+    std::scoped_lock lock(mutex);
+    std::sort(signalIds.begin(), signalIds.end());
+    EXPECT_EQ(signalIds, (std::vector<std::string>{ "CH1.time", "CH1.value" }));
+}
 
 TEST_F(DeviceCompatibilityTest, HiddenDomainSignalIsLinked)
 {
