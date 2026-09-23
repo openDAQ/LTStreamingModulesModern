@@ -68,6 +68,7 @@ class FakeLtPeer
             bool withholdTimeMetadata = false;      // announce the time signal but never send its metadata
             unsigned dropSubscribeRequests = 0;     // close this many leading value-signal subscribe requests unanswered
             bool streamData = false;                // stream value-signal data while it is subscribed
+            std::chrono::milliseconds runDelay{20}; // time to run a request; requests arriving within it are in flight together
         };
 
         explicit FakeLtPeer(Options options)
@@ -210,9 +211,9 @@ class FakeLtPeer
                     if (ec)
                         return;
 
-                    // requests arriving within 20 ms of each other are in flight together
+                    // requests arriving within the run delay of each other are in flight together
                     inFlight.push_back({ stream, nlohmann::json::parse(request->body(), nullptr, false) });
-                    inFlightTimer.expires_after(20ms);
+                    inFlightTimer.expires_after(options.runDelay);
                     inFlightTimer.async_wait(
                         [this](const boost::system::error_code& ec)
                         {
@@ -273,6 +274,7 @@ class FakeLtPeer
                     return error(id);
 
                 valueSubscribed = true;
+                streamStart = sampleIndexNow();
                 sendValueSignalFamily();
 
                 if (options.streamData)
@@ -312,9 +314,16 @@ class FakeLtPeer
             };
         }
 
+        // The device's sample clock runs at 5 kHz whether or not anybody is subscribed; a new stream starts where it stands
+        std::int64_t sampleIndexNow() const
+        {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - created).count() * 5;
+        }
+
         void startStreamingData()
         {
             // give the linear time table its start point, then pump value samples periodically
+            timeStart = { streamStart, streamStart };
             peer->send_data(timeSigno, boost::asio::buffer(&timeStart, sizeof(timeStart)));
             sendValueData();
         }
@@ -371,6 +380,7 @@ class FakeLtPeer
         {
             peer->send_metadata(valueSigno, "signal", {
                 { "tableId", tableId },
+                { "valueIndex", streamStart },
                 { "relatedSignals", {
                     { { "type", "time" }, { "signalId", timeSignalId } },
                 } },
@@ -415,8 +425,11 @@ class FakeLtPeer
         boost::asio::steady_timer inFlightTimer;
         std::thread thread;
 
+        const std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
+        std::int64_t streamStart = 0;           // only touched on the ioc thread
+
         // sent by reference from the asynchronous send_data(), so they must outlive the calls
-        const wss::detail::streaming_protocol::linear_payload timeStart{0, 0};
+        wss::detail::streaming_protocol::linear_payload timeStart{0, 0};
         const std::vector<float> valueSamples = std::vector<float>(100, 1.0f);
 
         bool valueSubscribed = false;           // only touched on the ioc thread
@@ -744,6 +757,39 @@ TEST_F(DeviceCompatibilityTest, ResubscribeWithinOneRoundTripKeepsDataFlowing)
 
     std::this_thread::sleep_for(500ms);
     EXPECT_GT(reader.getAvailableCount(), 0u);
+}
+
+// The application's subscribe starts a new stream on the device, so data of the fetch subscription would end in a domain gap
+TEST_F(DeviceCompatibilityTest, ReaderConnectedAtPublicationGetsNoDomainGap)
+{
+    FakeLtPeer::Options options;
+    options.streamData = true;
+    options.runDelay = 200ms;  // the fetch subscription streams until the device has run its release
+    FakeLtPeer peer(options);
+
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
+
+    auto valueSignal = waitForSignal(device, "CH1.value", 5s);
+    ASSERT_TRUE(valueSignal.assigned());
+    auto reader = buildStreamReader(valueSignal);
+
+    std::vector<double> values(100);
+    std::vector<std::int64_t> domain(100);
+    SizeT samples = 0;
+
+    for (const auto deadline = std::chrono::steady_clock::now() + 2s; std::chrono::steady_clock::now() < deadline;)
+    {
+        SizeT count = values.size();
+        const auto status = reader.readWithDomain(values.data(), domain.data(), &count, 100);
+        samples += count;
+
+        if (status.getReadStatus() == ReadStatus::Event)
+            ASSERT_NE(status.getEventPacket().getEventId(), event_packet_id::IMPLICIT_DOMAIN_GAP_DETECTED)
+                << "after " << samples << " samples";
+    }
+
+    EXPECT_GT(samples, 0u);
 }
 
 TEST_F(DeviceCompatibilityTest, FetchSubscriptionEndsAtPublication)

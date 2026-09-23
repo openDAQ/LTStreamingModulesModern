@@ -65,6 +65,7 @@ struct WsStreamingRemoteSignalEntry
     bool isSubscribed = false;  /**< openDAQ's latest request: subscribe or unsubscribe. */
     bool ackPending = false;    /**< The device has not yet acknowledged openDAQ's latest request. */
     bool fetching = false;      /**< The subscription that fetches the signal's metadata is open. */
+    bool isDomain = false;      /**< Another signal uses this one as its domain signal. */
 };
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
