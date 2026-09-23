@@ -654,7 +654,9 @@ std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::resolveDomainEntry(
     auto domainEntry = createSignalEntry(domainSignal);
 
     // process its already-received metadata now so it publishes before the referencing signal
-    // (if the metadata hasn't arrived yet, its later arrival publishes the entry instead)
+    // (if the metadata hasn't arrived yet, its later arrival publishes the entry instead); the
+    // link goes first, so that the publication links a referencing signal that is published already
+    entry->domainEntry = domainEntry;
     if (!domainSignal->metadata().json().empty())
         onRemoteSignalMetadataChanged(domainEntry);
 
