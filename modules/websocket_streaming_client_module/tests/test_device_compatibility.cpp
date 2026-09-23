@@ -69,6 +69,7 @@ class FakeLtPeer
             unsigned dropSubscribeRequests = 0;     // close this many leading value-signal subscribe requests unanswered
             bool streamData = false;                // stream value-signal data while it is subscribed
             std::chrono::milliseconds runDelay{20}; // time to run a request; requests arriving within it are in flight together
+            bool rejectValueMetadata = false;       // give the value signal a tick resolution the client rejects
         };
 
         explicit FakeLtPeer(Options options)
@@ -378,7 +379,7 @@ class FakeLtPeer
 
         void sendValueMetadata()
         {
-            peer->send_metadata(valueSigno, "signal", {
+            nlohmann::json metadata = {
                 { "tableId", tableId },
                 { "valueIndex", streamStart },
                 { "relatedSignals", {
@@ -389,7 +390,12 @@ class FakeLtPeer
                     { "rule", "explicit" },
                     { "dataType", "real32" },
                 } },
-            });
+            };
+
+            if (options.rejectValueMetadata)
+                metadata["definition"]["resolution"] = { { "num", 1 }, { "denom", 0 } };
+
+            peer->send_metadata(valueSigno, "signal", metadata);
         }
 
         void sendTimeMetadata()
@@ -803,6 +809,24 @@ TEST_F(DeviceCompatibilityTest, FetchSubscriptionEndsAtPublication)
 
     EXPECT_EQ(peer.subscribeRequestCount(), 1u);
     EXPECT_EQ(peer.valueUnsubscribeRequestCount(), 1u);
+}
+
+TEST_F(DeviceCompatibilityTest, SignalWithRejectedMetadataReleasesItsFetch)
+{
+    FakeLtPeer::Options options;
+    options.rejectValueMetadata = true;
+    options.streamData = true;  // data for a signal without a descriptor must not end the process
+    FakeLtPeer peer(options);
+
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
+
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (peer.valueUnsubscribeRequestCount() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(50ms);
+
+    EXPECT_EQ(peer.valueUnsubscribeRequestCount(), 1u);
+    EXPECT_EQ(device.getSignals(search::Recursive(search::Any())).getCount(), 0u);
 }
 
 TEST_F(DeviceCompatibilityTest, SignalPublishesWithoutDomainWhenMetadataNeverArrives)
