@@ -40,6 +40,7 @@
 #include <websocket_streaming_client_module/module_dll.h>
 
 #include <opendaq/context_factory.h>
+#include <opendaq/event_packet_params.h>
 #include <opendaq/module_ptr.h>
 #include <opendaq/opendaq.h>
 #include <opendaq/search_filter_factory.h>
@@ -538,17 +539,36 @@ TEST_F(DeviceCompatibilityTest, DomainMetadataArrivingLateIsStillLinked)
 {
     FakeLtPeer::Options options;
     options.timeMetadataBeforeValue = false;
-    options.timeMetadataDelay = 300ms;
+    options.timeMetadataDelay = 1s;
 
     FakeLtPeer peer(options);
-    auto [instance, device, signals] = connectAndWaitForSignals(peer);
-    ASSERT_EQ(signals.getCount(), 2u);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 1);
 
     auto valueSignal = findSignalByName(signals, "CH1.value");
     ASSERT_TRUE(valueSignal.assigned());
 
-    // the value signal must have been deferred until the time signal published
+    // connected before the time signal's metadata arrives, the reader learns the domain from an event
+    auto reader = PacketReader(valueSignal);
+
+    // the link lands after the time signal is added, so the signal count does not show it
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!valueSignal.getDomainSignal().assigned() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(50ms);
+
     ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
+    ASSERT_EQ(valueSignal.getDomainSignal(),
+        findSignalByName(device.getSignals(search::Recursive(search::Any())), "CH1.time"));
+
+    DataDescriptorPtr domainDescriptor;
+    for (const auto& packet : reader.readAll())
+        if (const auto event = packet.asPtrOrNull<IEventPacket>();
+                event.assigned() && event.getEventId() == event_packet_id::DATA_DESCRIPTOR_CHANGED)
+            if (const DataDescriptorPtr descriptor = event.getParameters().get(event_packet_param::DOMAIN_DATA_DESCRIPTOR);
+                    descriptor.assigned())
+                domainDescriptor = descriptor;
+
+    ASSERT_TRUE(domainDescriptor.assigned());
+    ASSERT_EQ(domainDescriptor.getName(), "CH1.time");
 }
 
 TEST_F(DeviceCompatibilityTest, DroppedSubscribeRequestIsRetried)
@@ -725,8 +745,7 @@ TEST_F(DeviceCompatibilityTest, SignalPublishesWithoutDomainWhenMetadataNeverArr
 
     FakeLtPeer peer(options);
 
-    // deferral gives up after two sweep periods (~3 s); allow generous margin
-    auto [instance, device, signals] = connectAndWaitForSignals(peer, 1, 10s);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 1);
     ASSERT_EQ(signals.getCount(), 1u);
 
     auto valueSignal = findSignalByName(signals, "CH1.value");

@@ -87,6 +87,7 @@ WsStreamingDevice::WsStreamingDevice(
     auto& wsStreaming = *reinterpret_cast<WsStreaming *>(streaming.getObject());
 
     streamingEvents.emplace_back(wsStreaming.onSignalAvailable.connect(std::bind(&WsStreamingDevice::onSignalAvailable, this, _1, _2, _3)));
+    streamingEvents.emplace_back(wsStreaming.onDomainSignalChanged.connect(std::bind(&WsStreamingDevice::onDomainSignalChanged, this, _1, _2)));
     streamingEvents.emplace_back(wsStreaming.onSignalUnavailable.connect(std::bind(&WsStreamingDevice::onSignalUnavailable, this, _1)));
 
     wsStreaming.connect();
@@ -162,6 +163,20 @@ void WsStreamingDevice::onSignalAvailable(
 
     addSignal(openDaqSignal);
     streamingSignals[signal->id()] = openDaqSignal;
+}
+
+void WsStreamingDevice::onDomainSignalChanged(
+    wss::remote_signal_ptr signal,
+    wss::remote_signal_ptr domainSignal)
+{
+    auto lock = getRecursiveConfigLock2();
+    if (this->objPtr.template asPtr<IRemovable>(true).isRemoved() || !streaming.assigned())
+        return;
+
+    auto it = streamingSignals.find(signal->id());
+    auto domainIt = streamingSignals.find(domainSignal->id());
+    if (it != streamingSignals.end() && domainIt != streamingSignals.end())
+        it->second.setMirroredDomainSignal(domainIt->second.asPtr<IMirroredSignalConfig>());
 }
 
 void WsStreamingDevice::onSignalUnavailable(wss::remote_signal_ptr signal)
