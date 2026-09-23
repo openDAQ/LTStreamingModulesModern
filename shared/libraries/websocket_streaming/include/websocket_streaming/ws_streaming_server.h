@@ -106,6 +106,8 @@ class WsStreamingServer : public Server
             CoreEventArgsPtr& args);
 
         void rescan();
+        void rescan(FolderPtr folder);
+        void pruneRemovedSignals();
 
     private:
 
