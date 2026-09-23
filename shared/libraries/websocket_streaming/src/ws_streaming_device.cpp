@@ -88,6 +88,8 @@ WsStreamingDevice::WsStreamingDevice(
 
     streamingEvents.emplace_back(wsStreaming.onSignalAvailable.connect(std::bind(&WsStreamingDevice::onSignalAvailable, this, _1, _2, _3)));
     streamingEvents.emplace_back(wsStreaming.onSignalUnavailable.connect(std::bind(&WsStreamingDevice::onSignalUnavailable, this, _1)));
+
+    wsStreaming.connect();
 }
 
 PropertyObjectPtr WsStreamingDevice::createDefaultConfig()

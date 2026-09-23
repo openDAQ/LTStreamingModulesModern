@@ -311,9 +311,9 @@ TEST_F(WebsocketStreamingClientModuleTest, InsecureStreamingCompletesNullConfig)
 {
     // The plain channel completes a missing configuration too, and so fails on the unreachable
     // peer rather than on the configuration.
-    ASSERT_THROW((createWithImplementation<IStreaming, WsStreaming>(
-                      String("daq.lt://127.0.0.1:1/"), NullContext(), nullptr)),
-                 NotFoundException);
+    auto streaming = createWithImplementation<IStreaming, WsStreaming>(
+        String("daq.lt://127.0.0.1:1/"), NullContext(), nullptr);
+    ASSERT_THROW(reinterpret_cast<WsStreaming*>(streaming.getObject())->connect(), NotFoundException);
 }
 
 TEST_F(WebsocketStreamingClientModuleTest, DefaultInsecureStreamingConfig)
