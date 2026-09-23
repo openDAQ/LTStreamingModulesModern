@@ -538,6 +538,13 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
             entry->ptr->id(), ex.what(), entry->ptr->metadata().json().dump());
         entry->descriptor = nullptr;
         entry->domainEntry = nullptr;
+
+        // a signal that cannot be published would keep its fetch subscription, and the device its stream, for good
+        if (entry->fetching)
+        {
+            entry->fetching = false;
+            entry->ptr->unsubscribe();
+        }
     }
 
     if (entry->descriptor.assigned() && entry->isPublished)
