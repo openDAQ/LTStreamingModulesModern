@@ -19,3 +19,4 @@
 - [#2](https://github.com/openDAQ/LTStreamingModulesModern/pull/2) Import files from openDAQ SDK
 - [#8](https://github.com/openDAQ/LTStreamingModulesModern/pull/8) Bumped to 4.0.0 — major version raised to reflect the module's move to a standalone release cycle, decoupled from openDAQ core versioning.
 - [#25](https://github.com/openDAQ/LTStreamingModulesModern/pull/25) Precompiled headers and unity builds through opendaq-cmake-utils v1.1.0.
+- [#28](https://github.com/openDAQ/LTStreamingModulesModern/pull/28) Bump opendaq-cmake-utils to v1.1.1, fixing the aarch64 release build (GCC `-Werror=stringop-overflow` false positive in the `date` headers).
