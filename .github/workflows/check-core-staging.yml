@@ -18,18 +18,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: openDAQ/openDAQ-CI/.github/actions/resolve-channel@v3
+      - uses: openDAQ/openDAQ-CI/.github/actions/resolve-channel@jira/TBBAS-3547-staging-pull-by-annotations
         id: channel
 
       - name: Read the pinned core ref
         shell: bash
         run: echo "CORE_REF=$(cat opendaq_ref)" >> "$GITHUB_ENV"
 
-      - uses: openDAQ/openDAQ-CI/.github/actions/staging-check@v3
+      - uses: openDAQ/openDAQ-CI/.github/actions/staging-check@jira/TBBAS-3547-staging-pull-by-annotations
         env:
           CHANNEL: ${{ steps.channel.outputs.channel }}
         with:
           packages: >-
             [
-              { "path": "ghcr.io/openDAQ/$CHANNEL/staging/opendaq", "tag": "$CORE_REF" }
+              { "packages": [
+                  { "path": "ghcr.io/openDAQ/$CHANNEL/staging/opendaq", "annotations": { "org.opencontainers.image.revision": "$CORE_REF" } }
+              ] }
             ]
