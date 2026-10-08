@@ -20,6 +20,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/signals2/connection.hpp>
@@ -81,7 +82,17 @@ class WsStreamingServer : public Server
         void addCapability();
         void removeCapability();
 
-        void createListener(const SignalPtr& signal);
+        // A signal as read from the device tree, so the I/O thread can register it without the tree's locks
+        struct SignalSnapshot
+        {
+            SignalPtr signal;
+            SignalPtr domainSignal;
+            std::string id;
+            wss::metadata metadata;
+        };
+
+        std::vector<SignalSnapshot> scanSignals();
+        void createListener(const SignalSnapshot& snapshot);
 
         void onClientConnected(
             const wss::connection_ptr& connection);
@@ -111,6 +122,7 @@ class WsStreamingServer : public Server
             CoreEventArgsPtr& args);
 
         void rescan();
+        void applySignals(const std::vector<SignalSnapshot>& snapshots);
 
     private:
 

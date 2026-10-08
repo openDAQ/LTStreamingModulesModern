@@ -1,5 +1,22 @@
 #include "test_websocket_streaming_server_module.h"
 
+#include <future>
+#include <mutex>
+#include <set>
+#include <thread>
+
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
+
+#include <opendaq/data_descriptor_factory.h>
+#include <opendaq/device_impl.h>
+#include <opendaq/device_info_factory.h>
+
+#include <ws-streaming/client.hpp>
+#include <ws-streaming/connection.hpp>
+
+using namespace std::chrono_literals;
+
 TEST_F(WsStreamingServerModuleTest, CreateModule)
 {
     IModule* module = nullptr;
@@ -355,4 +372,111 @@ TEST_F(WsStreamingServerModuleTest, ProviderOptionsIgnoreUnknownKeys)
 #endif
     ASSERT_FALSE(config.hasProperty("NoSuchProperty"));
     ASSERT_EQ(config.getPropertyValue(PROPERTY_WS_STREAMING_PORT_SERVER), 7661);
+}
+
+namespace
+{
+
+// A root device whose signals the test adds from its own thread.
+class SignalAddingDevice : public Device
+{
+public:
+    explicit SignalAddingDevice(const ContextPtr& context)
+        : Device(context, nullptr, "dev")
+    {
+    }
+
+    std::string addTestSignal(const std::string& localId)
+    {
+        return createAndAddSignal(localId, DataDescriptorBuilder().setSampleType(SampleType::Float64).build())
+            .getGlobalId()
+            .toStdString();
+    }
+
+protected:
+    DeviceInfoPtr onGetInfo() override
+    {
+        return DeviceInfo("daqtest://dev");
+    }
+};
+
+}
+
+// The ws-streaming server is not thread-safe: a signal added on another thread is registered on its I/O thread
+TEST_F(WsStreamingServerModuleTest, SignalAddedOnAnotherThreadIsAnnouncedFromTheServerThread)
+{
+    const auto context = NullContext();
+    const auto module = CreateModule(context);
+    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
+    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
+    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+    const auto initialId = deviceImpl.addTestSignal("initial");
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7662), context);
+    auto& wsServer = static_cast<WsStreamingServer&>(*server.getObject()).getWsServer();
+
+    boost::asio::io_context clientIoc;
+    wss::client client{clientIoc.get_executor()};
+    wss::connection_ptr connection;
+    boost::signals2::scoped_connection onAvailable;
+    std::mutex mutex;
+    std::set<std::string> available;
+
+    client.async_connect("ws://127.0.0.1:7662/",
+        [&](const boost::system::error_code& ec, wss::connection_ptr c)
+        {
+            if (ec)
+                return;
+            connection = c;
+            onAvailable = c->on_available.connect(
+                [&](wss::remote_signal_ptr signal)
+                {
+                    std::scoped_lock lock(mutex);
+                    available.insert(signal->id());
+                });
+        });
+    std::thread clientThread{[&] { clientIoc.run(); }};
+
+    const auto isAvailable = [&](const std::string& id)
+    {
+        std::scoped_lock lock(mutex);
+        return available.count(id) > 0;
+    };
+    const auto waitAvailable = [&](const std::string& id)
+    {
+        for (int i = 0; i < 100 && !isAvailable(id); ++i)
+            std::this_thread::sleep_for(50ms);
+        return isAvailable(id);
+    };
+
+    EXPECT_TRUE(waitAvailable(initialId));
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    boost::asio::post(wsServer.executor(),
+        [&entered, released = release.get_future()]
+        {
+            entered.set_value();
+            released.wait();
+        });
+    entered.get_future().wait();
+
+    const auto addedId = deviceImpl.addTestSignal("added");
+    std::this_thread::sleep_for(300ms);
+    const bool announcedWhileServerThreadBlocked = isAvailable(addedId);
+    release.set_value();
+
+    EXPECT_FALSE(announcedWhileServerThreadBlocked) << "the signal was announced from the thread that added it";
+    EXPECT_TRUE(waitAvailable(addedId));
+
+    boost::asio::post(clientIoc,
+        [&]
+        {
+            onAvailable.disconnect();
+            if (connection)
+                connection->close();
+            clientIoc.stop();
+        });
+    clientThread.join();
+    server.stop();
 }

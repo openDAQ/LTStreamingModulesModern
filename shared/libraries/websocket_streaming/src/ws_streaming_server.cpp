@@ -438,21 +438,47 @@ void WsStreamingServer::removeCapability()
         info.asPtr<IDeviceInfoInternal>(true).removeServerCapability(CONST_LTS_STREAMING_ID);
 }
 
-void WsStreamingServer::createListener(const SignalPtr& signal)
+std::vector<WsStreamingServer::SignalSnapshot> WsStreamingServer::scanSignals()
 {
-    SignalPtr domainSignal = signal.getDomainSignal();
+    std::vector<SignalSnapshot> snapshots;
 
-    if (domainSignal.assigned())
-        createListener(domainSignal);
+    // domain signals are listed before the signals that use them
+    const std::function<void(const SignalPtr&)> add = [&](const SignalPtr& signal)
+    {
+        SignalPtr domainSignal = signal.getDomainSignal();
+        if (domainSignal.assigned())
+            add(domainSignal);
 
-    auto it = _localSignals.find(signal.getGlobalId());
+        snapshots.push_back({signal,
+                             domainSignal,
+                             signal.getGlobalId(),
+                             daq::websocket_streaming::descriptorToMetadata(signal, signal.getDescriptor())});
+    };
+
+    auto items = _rootDevice.getItems(search::Recursive(search::Any()));
+    for (const auto& item : items)
+        if (auto signal = item.asPtrOrNull<daq::ISignal>(); signal.assigned() && signal.getDescriptor().assigned())
+            add(signal);
+
+    return snapshots;
+}
+
+void WsStreamingServer::createListener(const SignalSnapshot& snapshot)
+{
+    const SignalPtr& signal = snapshot.signal;
+
+    // the snapshot may predate a removal on another thread
+    if (signal.isRemoved())
+        return;
+
+    auto it = _localSignals.find(snapshot.id);
     if (it != _localSignals.end())
     {
         // Check if the signal has acquired a new/different domain signal since it was added. If
         // so, we need to unregister the local_signal from ws-streaming and re-register it so that
         // the domain tab table is linked correctly.
 
-        if (domainSignal != it->second.domainSignal)
+        if (snapshot.domainSignal.getObject() != it->second.domainSignal.getObject())
         {
             _server.remove_local_signal(*it->second.localSignal);
             _localSignals.erase(it);
@@ -467,19 +493,19 @@ void WsStreamingServer::createListener(const SignalPtr& signal)
     auto& streamableSignal = _localSignals.emplace(
             std::piecewise_construct,
             std::forward_as_tuple(
-                signal.getGlobalId()),
+                snapshot.id),
             std::forward_as_tuple(
-                signal.getGlobalId(),
-                daq::websocket_streaming::descriptorToMetadata(signal, signal.getDescriptor()),
+                snapshot.id,
+                snapshot.metadata,
                 signal))
         .first->second;
 
-    streamableSignal.domainSignal = domainSignal;
+    streamableSignal.domainSignal = snapshot.domainSignal;
 
     streamableSignal.localSignal->on_subscribed.connect([
         =,
         &streamableSignal,
-        signal_id = signal.getGlobalId().toStdString()
+        signal_id = snapshot.id
     ]()
     {
         streamableSignal.listener = createWithImplementation<IInputPortNotifications, WsStreamingListener>(
@@ -493,7 +519,7 @@ void WsStreamingServer::createListener(const SignalPtr& signal)
     streamableSignal.localSignal->on_unsubscribed.connect([
         =,
         &streamableSignal,
-        signal_id = signal.getGlobalId().toStdString()
+        signal_id = snapshot.id
     ]()
     {
         streamableSignal.listener.release();
@@ -585,7 +611,13 @@ void WsStreamingServer::onAttributeChanged(
     rescan();
 }
 
+// The I/O thread owns the ws-streaming server but must not lock the tree: removing the server joins it under that lock
 void WsStreamingServer::rescan()
+{
+    boost::asio::post(_ioc, [this, snapshots = scanSignals()] { applySignals(snapshots); });
+}
+
+void WsStreamingServer::applySignals(const std::vector<SignalSnapshot>& snapshots)
 {
     auto it = _localSignals.begin();
     while (it != _localSignals.end())
@@ -601,10 +633,8 @@ void WsStreamingServer::rescan()
             ++it;
     }
 
-    auto items = _rootDevice.getItems(search::Recursive(search::Any()));
-    for (const auto& item : items)
-        if (auto signal = item.asPtrOrNull<daq::ISignal>(); signal.assigned() && signal.getDescriptor().assigned())
-            createListener(signal);
+    for (const auto& snapshot : snapshots)
+        createListener(snapshot);
 }
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
