@@ -23,7 +23,7 @@ jobs:
 
       - name: Read the pinned core ref
         shell: bash
-        run: echo "CORE_REF=$(cat opendaq_ref)" >> "$GITHUB_ENV"
+        run: echo "OPENDAQ_REF=$(cat opendaq_ref)" >> "$GITHUB_ENV"
 
       - uses: openDAQ/openDAQ-CI/.github/actions/staging-check@jira/TBBAS-3547-staging-pull-by-annotations
         env:
@@ -32,6 +32,6 @@ jobs:
           packages: >-
             [
               { "packages": [
-                  { "path": "ghcr.io/openDAQ/$CHANNEL/staging/opendaq", "annotations": { "org.opencontainers.image.revision": "$CORE_REF" } }
+                  { "path": "ghcr.io/openDAQ/$CHANNEL/staging/opendaq", "annotations": { "org.opencontainers.image.revision": "$OPENDAQ_REF" } }
               ] }
             ]
