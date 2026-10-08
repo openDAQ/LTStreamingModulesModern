@@ -191,7 +191,9 @@ StreamingPtr WebsocketStreamingClientModule::onCreateStreaming(const StringPtr& 
         streamingConfig = createDefaultStreamingConfig(formNewStyleConnectionString(connectionString));
 
     const StringPtr str = formConnectionString(connectionString, streamingConfig);
-    return createWithImplementation<IStreaming, WsStreaming>(str, context, streamingConfig);
+    auto streaming = createWithImplementation<IStreaming, WsStreaming>(str, context, streamingConfig);
+    reinterpret_cast<WsStreaming*>(streaming.getObject())->connect();
+    return streaming;
 }
 
 Bool WebsocketStreamingClientModule::onCompleteServerCapability(const ServerCapabilityPtr& source, const ServerCapabilityConfigPtr& target)

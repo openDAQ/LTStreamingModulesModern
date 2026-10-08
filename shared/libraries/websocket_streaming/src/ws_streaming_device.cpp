@@ -88,6 +88,7 @@ WsStreamingDevice::WsStreamingDevice(
 
     streamingEvents.emplace_back(wsStreaming.onSignalAvailable.connect(std::bind(&WsStreamingDevice::onSignalAvailable, this, _1, _2, _3)));
     streamingEvents.emplace_back(wsStreaming.onSignalUnavailable.connect(std::bind(&WsStreamingDevice::onSignalUnavailable, this, _1)));
+    wsStreaming.connect();
 }
 
 PropertyObjectPtr WsStreamingDevice::createDefaultConfig()
@@ -135,13 +136,12 @@ void WsStreamingDevice::onSignalAvailable(
 
     if (domainSignal)
     {
-        auto localId = WsStreamingSignal::createLocalId(domainSignal->id());
-        for (const auto& s : thisPtr<daq::DevicePtr>().getSignals())
-            if (s.getLocalId() == localId)
-                openDaqDomainSignal = s;
-        if (!openDaqDomainSignal.assigned())
+        // no thisPtr() here: this runs while the constructor is still connecting
+        auto it = streamingSignals.find(domainSignal->id());
+        if (it == streamingSignals.end())
             DAQ_THROW_EXCEPTION(NotFoundException,
                 "Streaming signal '{}' refers to unregistered domain signal '{}'", signal->id(), domainSignal->id());
+        openDaqDomainSignal = it->second;
     }
 
     auto openDaqSignal = createWithImplementation<IMirroredSignalPrivate, WsStreamingSignal>(
