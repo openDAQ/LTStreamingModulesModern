@@ -259,6 +259,7 @@ WsStreaming::~WsStreaming()
     {
         onAvailableConnection.disconnect();
         onUnavailableConnection.disconnect();
+        initialFetchTimer.cancel();
 
         for (auto& [id, entry] : signals)
         {

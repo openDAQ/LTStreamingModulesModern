@@ -690,3 +690,19 @@ TEST_F(DeviceCompatibilityTest, NoSignalIsPublishedBeforeTheOwnerListens)
     EXPECT_EQ(published, 2u);
 }
 
+// The metadata fetch arms a 1.5 s sweep timer; closing the connection must cancel it, not wait for it
+TEST_F(DeviceCompatibilityTest, ClosingDoesNotWaitForTheFetchSweep)
+{
+    FakeLtPeer peer({});
+    auto streaming = createStreaming(peer);
+    static_cast<websocket_streaming::WsStreaming&>(*streaming.getObject()).connect();
+
+    for (int i = 0; i < 100 && peer.subscribeRequestCount() == 0; ++i)
+        std::this_thread::sleep_for(10ms);
+    ASSERT_EQ(peer.subscribeRequestCount(), 1u);
+
+    const auto start = std::chrono::steady_clock::now();
+    streaming.release();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    EXPECT_LT(elapsed.count(), 2000);
+}
