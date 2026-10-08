@@ -9,6 +9,7 @@
  * request handling.
  */
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -35,6 +36,7 @@
 #include <ws-streaming/detail/streaming_protocol.hpp>
 
 #include <testutils/testutils.h>
+#include <websocket_streaming/ws_streaming.h>
 #include <websocket_streaming_client_module/module_dll.h>
 
 #include <opendaq/context_factory.h>
@@ -474,6 +476,13 @@ auto buildStreamReader(const SignalPtr& signal)
         .build();
 }
 
+// Creates the streaming object on its own, without the device that normally owns it
+StreamingPtr createStreaming(const FakeLtPeer& peer)
+{
+    return createWithImplementation<IStreaming, websocket_streaming::WsStreaming>(
+        String("daq.lt://127.0.0.1:" + std::to_string(peer.port()) + "/"), NullContext(), nullptr);
+}
+
 }  // namespace
 
 using DeviceCompatibilityTest = testing::Test;
@@ -660,3 +669,24 @@ TEST_F(DeviceCompatibilityTest, SignalPublishesWithoutDomainWhenMetadataNeverArr
     ASSERT_TRUE(valueSignal.assigned());
     ASSERT_FALSE(valueSignal.getDomainSignal().assigned());
 }
+
+// The device connects its slots after creating the streaming object; a signal published before is lost
+TEST_F(DeviceCompatibilityTest, NoSignalIsPublishedBeforeTheOwnerListens)
+{
+    FakeLtPeer peer({});
+    auto streaming = createStreaming(peer);
+    auto& wsStreaming = static_cast<websocket_streaming::WsStreaming&>(*streaming.getObject());
+
+    // an owner slower than the peer, which has answered the metadata fetch by now
+    std::this_thread::sleep_for(500ms);
+
+    std::atomic<unsigned> published{0};
+    boost::signals2::scoped_connection slot = wsStreaming.onSignalAvailable.connect(
+        [&published](wss::remote_signal_ptr, wss::remote_signal_ptr, const DataDescriptorPtr&) { ++published; });
+    wsStreaming.connect();
+
+    for (int i = 0; i < 100 && published < 2; ++i)
+        std::this_thread::sleep_for(50ms);
+    EXPECT_EQ(published, 2u);
+}
+

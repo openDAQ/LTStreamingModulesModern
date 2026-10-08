@@ -106,7 +106,7 @@ class WsStreaming : public Streaming
     public:
 
         /*!
-         * @brief Constructs a streaming object and initiates a connection to the remote peer.
+         * @brief Constructs a streaming object. The connection starts with connect().
          *
          * @param connectionString The openDAQ connection string, which must use the `daq.lt://`
          *     prefix. The remote peer address and TCP port number are parsed from the connection
@@ -122,6 +122,17 @@ class WsStreaming : public Streaming
          * @brief Destroys a streaming object and stops the Boost.Asio I/O context's thread.
          */
         ~WsStreaming();
+
+        /*!
+         * @brief Connects to the remote peer and waits until the connection is established.
+         *
+         * Connect the slots of onSignalAvailable and onSignalUnavailable first: signals are
+         * published as soon as the connection is up, and each one is published only once.
+         *
+         * @throws NotFoundException The peer cannot be reached.
+         * @throws AuthenticationFailedException The TLS handshake failed.
+         */
+        void connect();
 
         /*!
          * @brief An event raised when a signal becomes available.
@@ -207,6 +218,9 @@ class WsStreaming : public Streaming
         void armInitialFetchSweep();
         void onInitialFetchSweep(const boost::system::error_code& ec);
         void onInitialFetchResubscribe(const boost::system::error_code& ec);
+
+        std::string wsConnectionString;
+        bool isSecureChannel = false;
 
         boost::asio::io_context ioContext;
         std::thread thread;
