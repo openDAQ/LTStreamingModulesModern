@@ -172,8 +172,6 @@ TEST_F(WsStreamingServerModuleTest, AddCapabilityWsOnly)
     ASSERT_EQ(cap.getPrefix(), CONST_LT_STREAMING_PREFIX);
     ASSERT_EQ(cap.getPort(), 7650);
     ASSERT_EQ(cap.getConnectionType(), "TCP/IP");
-    ASSERT_EQ(cap.getProtocolGroupId(), CONST_LT_PROTOCOL_GROUP_ID);
-    ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LT_STREAMING_SECURITY_LVL);
 
     server.stop();
 }

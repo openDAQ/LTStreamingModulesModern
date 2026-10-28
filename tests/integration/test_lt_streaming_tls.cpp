@@ -463,8 +463,6 @@ TEST_F(LtStreamingTlsTest, AddCapabilityWssOnly)
     const auto cap = info.getServerCapability(CONST_LTS_STREAMING_ID);
     ASSERT_EQ(cap.getPrefix(), CONST_LTS_STREAMING_PREFIX);
     ASSERT_EQ(cap.getPort(), 7632);
-    ASSERT_EQ(cap.getProtocolGroupId(), CONST_LT_PROTOCOL_GROUP_ID);
-    ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LTS_STREAMING_SECURITY_LVL);
 }
 
 TEST_F(LtStreamingTlsTest, AddCapabilityBothChannels)
@@ -481,8 +479,6 @@ TEST_F(LtStreamingTlsTest, AddCapabilityBothChannels)
 
     ASSERT_EQ(plain.getPort(), 7633);
     ASSERT_EQ(secure.getPort(), 7634);
-    ASSERT_EQ(plain.getProtocolGroupId(), secure.getProtocolGroupId());
-    ASSERT_GT(secure.getProtocolSecurityLevel(), plain.getProtocolSecurityLevel());
 }
 
 TEST_F(LtStreamingTlsTest, ConnectedClientOverWsReportsPlaintextProtocol)

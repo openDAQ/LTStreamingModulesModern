@@ -15,13 +15,10 @@ static constexpr const char* CONST_LTS_STREAMING_PREFIX = "daq.lts";
 
 static constexpr const char* CONST_SERVICE_CAPABILITY = "LT";
 
-static constexpr const char* CONST_LT_PROTOCOL_GROUP_ID = "LTStreaming";
 static constexpr const char* CONST_LT_STREAMING_ID = "OpenDAQLTStreaming";
 static constexpr const char* CONST_LTS_STREAMING_ID = "OpenDAQLTStreamingSecure";
 static constexpr const char* CONST_LT_STREAMING_SERVER_ID = "OpenDAQLTStreaming";
 static constexpr const char* CONST_LTS_STREAMING_SERVER_ID = "OpenDAQLTStreamingSecure";
-static constexpr const int64_t CONST_LT_STREAMING_SECURITY_LVL = 0;
-static constexpr const int64_t CONST_LTS_STREAMING_SECURITY_LVL = 10;
 
 static constexpr const char* PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER = "EnableStreamingPort";
 static constexpr const char* PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER = "EnableControlPort";
