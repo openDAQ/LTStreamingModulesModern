@@ -9,7 +9,6 @@
  * request handling.
  */
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -74,8 +73,15 @@ class FakeLtPeer
             acceptor.async_accept(
                 [this](const boost::system::error_code& ec, boost::asio::ip::tcp::socket socket)
                 {
-                    if (!ec)
-                        handleAccept(std::move(socket));
+                    if (ec)
+                        return;
+
+                    {
+                        std::scoped_lock lock(mutex);
+                        ++acceptedConnections;
+                    }
+
+                    handleAccept(std::move(socket));
                 });
 
             thread = std::thread([this] { ioc.run(); });
@@ -90,6 +96,13 @@ class FakeLtPeer
         std::uint16_t port() const
         {
             return acceptor.local_endpoint().port();
+        }
+
+        // Counted before the peer answers the WebSocket upgrade, so before the client's connect completes
+        unsigned acceptedConnectionCount()
+        {
+            std::scoped_lock lock(mutex);
+            return acceptedConnections;
         }
 
         unsigned subscribeRequestCount()
@@ -394,6 +407,7 @@ class FakeLtPeer
         boost::signals2::scoped_connection onMetadata;
 
         std::mutex mutex;
+        unsigned acceptedConnections = 0;
         unsigned valueSubscribeRequests = 0;
         unsigned timeSubscribeRequests = 0;
         unsigned valueUnsubscribeRequests = 0;
@@ -670,23 +684,37 @@ TEST_F(DeviceCompatibilityTest, SignalPublishesWithoutDomainWhenMetadataNeverArr
     ASSERT_FALSE(valueSignal.getDomainSignal().assigned());
 }
 
-// The device connects its slots after creating the streaming object; a signal published before is lost
-TEST_F(DeviceCompatibilityTest, NoSignalIsPublishedBeforeTheOwnerListens)
+// The device connects its slots after creating the streaming object; a constructor that connected
+// published signals before anyone listened, and each signal is published only once
+TEST_F(DeviceCompatibilityTest, ConstructingTheStreamingDoesNotConnect)
 {
     FakeLtPeer peer({});
     auto streaming = createStreaming(peer);
+
+    // a connecting constructor returns only after the peer has accepted it and answered the upgrade
+    EXPECT_EQ(peer.acceptedConnectionCount(), 0u);
+}
+
+TEST_F(DeviceCompatibilityTest, NoSignalIsPublishedBeforeTheOwnerListens)
+{
+    FakeLtPeer peer({});
+
+    // declared before the streaming object, whose destructor joins the I/O thread that runs the slot
+    std::promise<void> bothPublished;
+    unsigned published = 0;
+
+    auto streaming = createStreaming(peer);
     auto& wsStreaming = static_cast<websocket_streaming::WsStreaming&>(*streaming.getObject());
 
-    // an owner slower than the peer, which has answered the metadata fetch by now
-    std::this_thread::sleep_for(500ms);
-
-    std::atomic<unsigned> published{0};
     boost::signals2::scoped_connection slot = wsStreaming.onSignalAvailable.connect(
-        [&published](wss::remote_signal_ptr, wss::remote_signal_ptr, const DataDescriptorPtr&) { ++published; });
+        [&](wss::remote_signal_ptr, wss::remote_signal_ptr, const DataDescriptorPtr&)
+        {
+            if (++published == 2)
+                bothPublished.set_value();
+        });
     wsStreaming.connect();
 
-    for (int i = 0; i < 100 && published < 2; ++i)
-        std::this_thread::sleep_for(50ms);
-    EXPECT_EQ(published, 2u);
+    // the hidden time signal and the value signal that references it
+    ASSERT_EQ(bothPublished.get_future().wait_for(5s), std::future_status::ready);
 }
 
