@@ -259,6 +259,8 @@ WsStreaming::~WsStreaming()
     {
         onAvailableConnection.disconnect();
         onUnavailableConnection.disconnect();
+        isClosing = true;
+        initialFetchTimer.cancel();
 
         for (auto& [id, entry] : signals)
         {
@@ -525,7 +527,8 @@ void WsStreaming::armInitialFetchSweep()
 
 void WsStreaming::onInitialFetchSweep(const boost::system::error_code& ec)
 {
-    if (ec == boost::asio::error::operation_aborted)
+    // cancel() cannot abort a wait whose handler is already queued; that handler sees success
+    if (ec == boost::asio::error::operation_aborted || isClosing)
         return;
 
     bool retrying = false;
@@ -590,7 +593,8 @@ void WsStreaming::onInitialFetchSweep(const boost::system::error_code& ec)
 
 void WsStreaming::onInitialFetchResubscribe(const boost::system::error_code& ec)
 {
-    if (ec == boost::asio::error::operation_aborted)
+    // cancel() cannot abort a wait whose handler is already queued; that handler sees success
+    if (ec == boost::asio::error::operation_aborted || isClosing)
         return;
 
     initialFetchSweepArmed = false;

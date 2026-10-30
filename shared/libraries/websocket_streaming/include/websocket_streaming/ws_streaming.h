@@ -237,6 +237,9 @@ class WsStreaming : public Streaming
         boost::asio::steady_timer initialFetchTimer;
         bool initialFetchSweepArmed = false;
 
+        /** Set on the I/O thread when teardown starts; stops a sweep that fired before the timer was cancelled. */
+        bool isClosing = false;
+
         std::promise<boost::system::error_code> promise;
 };
 

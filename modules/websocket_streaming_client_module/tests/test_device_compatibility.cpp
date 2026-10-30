@@ -9,6 +9,7 @@
  * request handling.
  */
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -718,3 +719,34 @@ TEST_F(DeviceCompatibilityTest, NoSignalIsPublishedBeforeTheOwnerListens)
     ASSERT_EQ(bothPublished.get_future().wait_for(5s), std::future_status::ready);
 }
 
+// The metadata fetch arms a 1.5 s sweep timer; closing the connection must cancel it, not wait for it
+TEST_F(DeviceCompatibilityTest, ClosingDoesNotWaitForTheFetchSweep)
+{
+    // a stalled runner slows one teardown; a missing cancel() slows every one by the sweep period
+    auto fastest = std::chrono::milliseconds::max();
+    for (int run = 0; run < 3 && fastest >= 1000ms; ++run)
+    {
+        FakeLtPeer peer({});
+        auto streaming = createStreaming(peer);
+        static_cast<websocket_streaming::WsStreaming&>(*streaming.getObject()).connect();
+
+        // the sweep timer is armed in the same I/O handler that sends this request
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (peer.subscribeRequestCount() == 0 && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(10ms);
+        ASSERT_GE(peer.subscribeRequestCount(), 1u)
+            << "No subscribe request within 5 s: the metadata fetch never started, so no sweep timer is "
+               "armed and the teardown time would prove nothing";
+
+        const auto start = std::chrono::steady_clock::now();
+        // the last reference: the destructor runs inside the measured interval
+        ASSERT_EQ(streaming.detach()->releaseRef(), 0)
+            << "Another reference keeps the streaming alive: its destructor did not run inside the measured "
+               "interval, so the teardown time would prove nothing";
+        fastest = std::min(fastest,
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start));
+    }
+
+    // an uncancelled timer holds the destructor until the sweep fires, 1.5 s after the request
+    EXPECT_LT(fastest.count(), 1000);
+}
