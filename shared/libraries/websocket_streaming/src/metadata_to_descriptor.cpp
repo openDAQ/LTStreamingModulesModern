@@ -15,10 +15,16 @@
  */
 
 #include <string>
+#include <tuple>
 
+#include <nlohmann/json.hpp>
+
+#include <coretypes/float_factory.h>
+#include <coretypes/integer_factory.h>
 #include <opendaq/data_descriptor_factory.h>
 #include <opendaq/data_descriptor_ptr.h>
 #include <opendaq/dimension_factory.h>
+#include <opendaq/dimension_rule_factory.h>
 
 #include <ws-streaming/data_types.hpp>
 #include <ws-streaming/metadata.hpp>
@@ -43,6 +49,52 @@ static SampleType getOpenDaqSampleType(const std::string& type)
     else if (type == wss::data_types::uint64_t) return SampleType::UInt64;
     else if (type == wss::data_types::struct_t) return SampleType::Struct;
     else return SampleType::Undefined;
+}
+
+static NumberPtr getOpenDaqNumber(const nlohmann::json& linear, const char* key)
+{
+    if (!linear.contains(key))
+        return Integer(0);
+
+    const auto& value = linear[key];
+
+    if (value.is_number_integer())
+        return Integer(value.get<std::int64_t>());
+    if (value.is_number())
+        return Floating(value.get<double>());
+
+    return Integer(0);
+}
+
+// Only linear dimensions with a size are reconstructed: these are exactly the ones that
+// wss::metadata::sample_size() counts, so the descriptor matches the received sample size.
+static ListPtr<IDimension> getOpenDaqDimensions(const wss::metadata& metadata)
+{
+    auto dimensions = List<IDimension>();
+
+    for (const auto& dim : metadata.dimensions())
+    {
+        if (dim.rule() != wss::rule_types::linear_rule)
+            continue;
+
+        const auto size = std::get<2>(dim.linear_start_delta_size()).value_or(0);
+        if (size <= 0)
+            continue;
+
+        const auto& linear = dim.json()["linear"];
+
+        dimensions.pushBack(
+            DimensionBuilder()
+                .setName(dim.name())
+                .setRule(
+                    LinearDimensionRule(
+                        getOpenDaqNumber(linear, "delta"),
+                        getOpenDaqNumber(linear, "start"),
+                        static_cast<SizeT>(size)))
+                .build());
+    }
+
+    return dimensions;
 }
 
 DataDescriptorPtr metadataToDescriptor(
@@ -96,6 +148,9 @@ DataDescriptorPtr metadataToDescriptor(
 
     else if (rule == wss::rule_types::constant_rule)
         builder.setRule(ConstantDataRule());
+
+    if (auto dimensions = getOpenDaqDimensions(metadata); dimensions.getCount() > 0)
+        builder.setDimensions(dimensions);
 
     if (builder.getSampleType() == SampleType::Struct)
     {

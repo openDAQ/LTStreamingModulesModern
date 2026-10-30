@@ -3,6 +3,7 @@ set(TEST_APP test_${MODULE_NAME})
 
 set(TEST_SOURCES test_websocket_streaming_client_module.cpp
                  test_device_compatibility.cpp
+                 test_array_signals.cpp
                  test_app.cpp
 )
 

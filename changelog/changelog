@@ -8,12 +8,14 @@
 - [#18](https://github.com/openDAQ/LTStreamingModulesModern/pull/18) Handle subscribe/unsubscribe requests on the I/O thread to avoid a data race on the signal map.
 - [#18](https://github.com/openDAQ/LTStreamingModulesModern/pull/18) Guard signal publication so exceptions can no longer escape into the Boost.Asio I/O thread and terminate the process.
 - [#19](https://github.com/openDAQ/LTStreamingModulesModern/pull/19) Hand the initial-fetch subscription over to an immediately subscribing application, fixing data that stopped on devices that reorder back-to-back unsubscribe/subscribe pairs.
+- Transfer the dimensions of array signals (e.g. FFT spectra) in the signal metadata and restore them on the client, fixing clients that split each array sample into scalar samples and timestamped them ahead of real time.
 
 ## Documenation
 
 ## Misc
 
 - [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Bump ws-streaming to v3.1.1, fixing warnings-as-errors builds (GCC `-Werror=reorder`, MSVC `/WX` C5038).
+- Bump ws-streaming to the commit that supports dimensions on signal values ([openDAQ/ws-streaming#22](https://github.com/openDAQ/ws-streaming/pull/22)).
 
 - [#1](https://github.com/openDAQ/LTStreamingModulesModern/pull/1) Project initial version.
 - [#2](https://github.com/openDAQ/LTStreamingModulesModern/pull/2) Import files from openDAQ SDK

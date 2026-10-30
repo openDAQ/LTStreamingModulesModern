@@ -16,10 +16,14 @@
 
 #include <cstdint>
 
+#include <coretypes/number_ptr.h>
 #include <coretypes/string_ptr.h>
 #include <opendaq/data_descriptor_ptr.h>
+#include <opendaq/dimension_ptr.h>
+#include <opendaq/dimension_rule_ptr.h>
 
 #include <ws-streaming/data_types.hpp>
+#include <ws-streaming/dimension_builder.hpp>
 #include <ws-streaming/metadata.hpp>
 #include <ws-streaming/metadata_builder.hpp>
 #include <ws-streaming/struct_field_builder.hpp>
@@ -48,6 +52,35 @@ static std::string getWebSocketDataType(SampleType type)
     }
 }
 
+static wss::dimension_builder getWebSocketDimension(const DimensionPtr& dimension)
+{
+    const auto name = dimension.getName();
+    wss::dimension_builder builder(name.assigned() ? name.toStdString() : "");
+
+    const SizeT size = dimension.getSize();
+    const auto rule = dimension.getRule();
+
+    if (rule.assigned() && rule.getType() == DimensionRuleType::Linear)
+    {
+        const NumberPtr start = rule.getParameters().get("start");
+        const NumberPtr delta = rule.getParameters().get("delta");
+
+        if (start.getCoreType() == ctInt && delta.getCoreType() == ctInt)
+            builder.linear_rule(start.getIntValue(), delta.getIntValue(), size);
+        else
+            builder.linear_rule_real(start.getFloatValue(), delta.getFloatValue(), size);
+    }
+
+    else
+    {
+        // The protocol only describes linear dimensions. Describe other rules by element index
+        // so that the peer still knows how many values each sample holds.
+        builder.linear_rule(0, 1, size);
+    }
+
+    return builder;
+}
+
 static wss::metadata descriptorToMetadata(
     const DataDescriptorPtr& descriptor,
     const StringPtr& signalId,
@@ -58,6 +91,12 @@ static wss::metadata descriptorToMetadata(
     std::string dataType = getWebSocketDataType(descriptor.getSampleType());
     if (!dataType.empty())
         builder.data_type(dataType);
+
+    // Array signals (e.g. FFT spectra) carry several values per sample. Without their
+    // dimensions, the peer would split each sample into scalars and misplace them in time.
+    if (auto dims = descriptor.getDimensions(); dims.assigned())
+        for (const auto& dim : dims)
+            builder.dimension(getWebSocketDimension(dim));
 
     if (auto fields = descriptor.getStructFields(); fields.assigned())
     {
