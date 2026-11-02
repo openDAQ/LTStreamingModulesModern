@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -121,7 +123,7 @@ class WsStreamingServer : public Server
             CoreEventArgsPtr& args);
 
         void rescan();
-        void applySignals(const std::vector<SignalSnapshot>& snapshots);
+        void applySignals(std::uint64_t scan, const std::vector<SignalSnapshot>& snapshots);
 
     private:
 
@@ -147,6 +149,9 @@ class WsStreamingServer : public Server
         wss::server _server;
         std::thread _thread;
         std::map<std::string, StreamableSignal> _localSignals;
+        // Scans are numbered on the threads that run them; only the I/O thread uses the last applied number
+        std::atomic<std::uint64_t> _scanCount{0};
+        std::uint64_t _appliedScan{0};
         Int _ws_port{0};
         Int _wss_port{0};
         std::string _path;

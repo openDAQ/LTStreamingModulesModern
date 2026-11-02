@@ -1,9 +1,10 @@
 #include "test_websocket_streaming_server_module.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <future>
+#include <map>
 #include <mutex>
-#include <set>
 #include <thread>
 
 #include <boost/asio/io_context.hpp>
@@ -12,6 +13,7 @@
 #include <opendaq/data_descriptor_factory.h>
 #include <opendaq/device_impl.h>
 #include <opendaq/device_info_factory.h>
+#include <opendaq/signal_impl.h>
 
 #include <ws-streaming/client.hpp>
 #include <ws-streaming/connection.hpp>
@@ -22,6 +24,45 @@ using namespace std::chrono_literals;
 
 namespace
 {
+
+    // A signal that, once armed, holds the next getDescriptor() call until released: it stops a scan of the tree
+    // midway, without holding any lock.
+    class GateSignal : public SignalImpl
+    {
+    public:
+        GateSignal(const ContextPtr& context,
+                   const DataDescriptorPtr& descriptor,
+                   const ComponentPtr& parent,
+                   const StringPtr& localId)
+            : SignalImpl(context, descriptor, parent, localId)
+        {
+        }
+
+        std::future<void> arm(std::future<void> releasedFuture)
+        {
+            released = std::move(releasedFuture);
+            entered = std::promise<void>{};
+            auto enteredFuture = entered.get_future();
+            armed = true;
+            return enteredFuture;
+        }
+
+        ErrCode INTERFACE_FUNC getDescriptor(IDataDescriptor** descriptor) override
+        {
+            if (armed.exchange(false))
+            {
+                entered.set_value();
+                released.wait();
+            }
+
+            return SignalImpl::getDescriptor(descriptor);
+        }
+
+    private:
+        std::atomic<bool> armed{false};
+        std::promise<void> entered;
+        std::future<void> released;
+    };
 
     // A root device whose signals the test adds from its own thread.
     class SignalAddingDevice : public Device
@@ -42,6 +83,14 @@ namespace
         SignalConfigPtr addSignal(const std::string& localId, const DataDescriptorPtr& descriptor)
         {
             return createAndAddSignal(localId, descriptor);
+        }
+
+        SignalConfigPtr addGateSignal(const std::string& localId)
+        {
+            SignalConfigPtr signal = createWithImplementation<ISignalConfig, GateSignal>(
+                context, DataDescriptorBuilder().setSampleType(SampleType::Float64).build(), signals, localId);
+            Device::addSignal(signal);
+            return signal;
         }
 
     protected:
@@ -67,7 +116,7 @@ namespace
                                          [this](wss::remote_signal_ptr signal)
                                          {
                                              std::scoped_lock lock(mutex);
-                                             available.insert(signal->id());
+                                             ++announcements[signal->id()];
                                              announced.notify_all();
                                          });
                                  });
@@ -90,13 +139,20 @@ namespace
         bool isAvailable(const std::string& id)
         {
             std::scoped_lock lock(mutex);
-            return available.count(id) > 0;
+            return announcements.count(id) > 0;
         }
 
         bool waitAvailable(const std::string& id)
         {
             std::unique_lock lock(mutex);
-            return announced.wait_for(lock, 5s, [&] { return available.count(id) > 0; });
+            return announced.wait_for(lock, 5s, [&] { return announcements.count(id) > 0; });
+        }
+
+        std::size_t announcementCount(const std::string& id)
+        {
+            std::scoped_lock lock(mutex);
+            const auto it = announcements.find(id);
+            return it != announcements.end() ? it->second : 0;
         }
 
     private:
@@ -106,7 +162,7 @@ namespace
         boost::signals2::scoped_connection onAvailable;
         std::mutex mutex;
         std::condition_variable announced;
-        std::set<std::string> available;
+        std::map<std::string, std::size_t> announcements;
         std::thread thread;
     };
 
@@ -570,6 +626,68 @@ TEST_F(WsStreamingServerModuleTest, SignalWhoseDescriptorIsClearedBeforeRegistra
     const auto markerId = deviceImpl.addTestSignal("marker");
     EXPECT_TRUE(client.waitAvailable(markerId));
     EXPECT_FALSE(client.isAvailable(cleared.getGlobalId().toStdString()));
+
+    server.stop();
+}
+
+// Scans from different threads can reach the I/O thread out of order: an older one must not undo a newer one.
+// One thread's scan reads the value signal's old domain and is held at the gate signal; meanwhile this thread
+// moves the value to a new domain and queues its own scan first. The older scan is then queued last. Each time
+// the value is re-registered, the client sees it announced again, so the test counts the announcements.
+TEST_F(WsStreamingServerModuleTest, OlderScanQueuedLastDoesNotRestoreTheOldDomain)
+{
+    const auto context = NullContext();
+    const auto module = CreateModule(context);
+    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
+    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
+    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+
+    const auto descriptor = DataDescriptorBuilder().setSampleType(SampleType::Float64).build();
+    const auto oldDomain = deviceImpl.addSignal("oldDomain", descriptor);
+    const auto newDomain = deviceImpl.addSignal("newDomain", descriptor);
+    const auto value = deviceImpl.addSignal("value", descriptor);
+    value.setDomainSignal(oldDomain);
+    // listed after the value signal: a scan held here has already read the value's domain
+    const auto gate = deviceImpl.addGateSignal("gate");
+    auto& gateImpl = static_cast<GateSignal&>(*gate.getObject());
+
+    // scan 1, from the constructor: the value is announced for the first time, with the old domain
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7665), context);
+    const auto valueId = value.getGlobalId().toStdString();
+    AvailableSignalsClient client{"ws://127.0.0.1:7665/"};
+    ASSERT_TRUE(client.waitAvailable(valueId));
+    // the I/O thread reads the gate's descriptor when it registers it; that must be over before the gate is armed
+    ASSERT_TRUE(client.waitAvailable(gate.getGlobalId().toStdString()));
+
+    // scan 2, on another thread: adding a signal starts a rescan that records the value with the old domain and
+    // stops at the gate, before it is queued
+    std::promise<void> release;
+    auto held = gateImpl.arm(release.get_future());
+    std::thread olderScan{[&] { deviceImpl.addTestSignal("trigger"); }};
+    const bool olderScanHeld = held.wait_for(5s) == std::future_status::ready;
+
+    // scan 3, on this thread: the domain change starts a rescan that records the new domain and is queued first;
+    // the gate is no longer armed, so it does not stop. The value is re-registered: second announcement
+    if (olderScanHeld)
+        value.setDomainSignal(newDomain);
+
+    // scan 2 finishes and is queued last. It must be dropped; applying it would re-register the value with the
+    // old domain (third announcement). Released and joined even if the gate was never reached: a joinable
+    // std::thread terminates the process when destroyed
+    release.set_value();
+    olderScan.join();
+    ASSERT_TRUE(olderScanHeld) << "the older scan never reached the gate signal";
+
+    // scan 4, queued after both. The client receives messages in order, so once the marker is announced every
+    // earlier scan has been applied. Had scan 2 restored the old domain, this scan would find the new one again
+    // and re-register the value once more (fourth announcement)
+    const auto markerId = deviceImpl.addTestSignal("marker");
+    ASSERT_TRUE(client.waitAvailable(markerId));
+
+    // the first announcement and the one for the domain change
+    EXPECT_EQ(client.announcementCount(valueId), 2u)
+        << "announced again after the domain change: the older scan re-registered the signal with the old domain "
+           "and the next scan re-registered it once more";
 
     server.stop();
 }

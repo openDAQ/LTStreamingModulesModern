@@ -610,11 +610,20 @@ void WsStreamingServer::onAttributeChanged(
 // The I/O thread owns the ws-streaming server but must not lock the tree: removing the server joins it under that lock
 void WsStreamingServer::rescan()
 {
-    boost::asio::post(_ioc, [this, snapshots = scanSignals()] { applySignals(snapshots); });
+    // numbered before the tree is read: a scan sees every change made before a lower number was taken
+    const auto scan = ++_scanCount;
+    boost::asio::post(_ioc, [this, scan, snapshots = scanSignals()] { applySignals(scan, snapshots); });
 }
 
-void WsStreamingServer::applySignals(const std::vector<SignalSnapshot>& snapshots)
+void WsStreamingServer::applySignals(std::uint64_t scan, const std::vector<SignalSnapshot>& snapshots)
 {
+    // Scans from different threads are queued in any order. One older than the last applied scan is
+    // dropped: whatever it saw that the newer one missed was changed later, and that change is
+    // followed by a scan of its own.
+    if (scan < _appliedScan)
+        return;
+    _appliedScan = scan;
+
     auto it = _localSignals.begin();
     while (it != _localSignals.end())
     {
