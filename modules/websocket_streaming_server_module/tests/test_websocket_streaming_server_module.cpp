@@ -5,6 +5,7 @@
 #include <future>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 
 #include <boost/asio/io_context.hpp>
@@ -64,6 +65,45 @@ namespace
         std::future<void> released;
     };
 
+    // A signal that fails on request: when its descriptor is read on a given thread, or when a listener connects.
+    class FaultySignal : public SignalImpl
+    {
+    public:
+        FaultySignal(const ContextPtr& context,
+                     const DataDescriptorPtr& descriptor,
+                     const ComponentPtr& parent,
+                     const StringPtr& localId)
+            : SignalImpl(context, descriptor, parent, localId)
+        {
+        }
+
+        ErrCode INTERFACE_FUNC getDescriptor(IDataDescriptor** descriptor) override
+        {
+            if (std::this_thread::get_id() == descriptorFailsOn)
+            {
+                ++failures;
+                return DAQ_MAKE_ERROR_INFO(OPENDAQ_ERR_GENERALERROR, "The descriptor cannot be read");
+            }
+
+            return SignalImpl::getDescriptor(descriptor);
+        }
+
+        ErrCode INTERFACE_FUNC listenerConnected(IConnection* connection) override
+        {
+            if (listenerConnectedFails)
+            {
+                ++failures;
+                return DAQ_MAKE_ERROR_INFO(OPENDAQ_ERR_GENERALERROR, "The listener cannot be connected");
+            }
+
+            return SignalImpl::listenerConnected(connection);
+        }
+
+        std::atomic<std::thread::id> descriptorFailsOn{};
+        std::atomic<bool> listenerConnectedFails{false};
+        std::atomic<int> failures{0};
+    };
+
     // A root device whose signals the test adds from its own thread.
     class SignalAddingDevice : public Device
     {
@@ -93,6 +133,15 @@ namespace
             return signal;
         }
 
+        SignalConfigPtr addFaultySignal(const std::string& localId, std::thread::id descriptorFailsOn = {})
+        {
+            SignalConfigPtr signal = createWithImplementation<ISignalConfig, FaultySignal>(
+                context, DataDescriptorBuilder().setSampleType(SampleType::Float64).build(), signals, localId);
+            static_cast<FaultySignal&>(*signal.getObject()).descriptorFailsOn = descriptorFailsOn;
+            Device::addSignal(signal);
+            return signal;
+        }
+
     protected:
         DeviceInfoPtr onGetInfo() override
         {
@@ -115,9 +164,18 @@ namespace
                                      onAvailable = c->on_available.connect(
                                          [this](wss::remote_signal_ptr signal)
                                          {
+                                             remoteSignals[signal->id()] = signal;
+                                             signal->on_subscribed.connect(
+                                                 [this, id = signal->id()]
+                                                 {
+                                                     std::scoped_lock lock(mutex);
+                                                     subscribed.insert(id);
+                                                     changed.notify_all();
+                                                 });
+
                                              std::scoped_lock lock(mutex);
                                              ++announcements[signal->id()];
-                                             announced.notify_all();
+                                             changed.notify_all();
                                          });
                                  });
             thread = std::thread{[this] { ioc.run(); }};
@@ -145,7 +203,7 @@ namespace
         bool waitAvailable(const std::string& id)
         {
             std::unique_lock lock(mutex);
-            return announced.wait_for(lock, 5s, [&] { return announcements.count(id) > 0; });
+            return changed.wait_for(lock, 5s, [&] { return announcements.count(id) > 0; });
         }
 
         std::size_t announcementCount(const std::string& id)
@@ -155,14 +213,31 @@ namespace
             return it != announcements.end() ? it->second : 0;
         }
 
+        // Subscribes to an announced signal; true once the server confirms, which it does after its own handling
+        bool subscribe(const std::string& id)
+        {
+            boost::asio::post(ioc,
+                              [this, id]
+                              {
+                                  if (const auto it = remoteSignals.find(id); it != remoteSignals.end())
+                                      it->second->subscribe();
+                              });
+
+            std::unique_lock lock(mutex);
+            return changed.wait_for(lock, 5s, [&] { return subscribed.count(id) > 0; });
+        }
+
     private:
         boost::asio::io_context ioc;
         wss::client client{ioc.get_executor()};
         wss::connection_ptr connection;
         boost::signals2::scoped_connection onAvailable;
         std::mutex mutex;
-        std::condition_variable announced;
+        std::condition_variable changed;
         std::map<std::string, std::size_t> announcements;
+        std::set<std::string> subscribed;
+        // used on the client thread only
+        std::map<std::string, wss::remote_signal_ptr> remoteSignals;
         std::thread thread;
     };
 
@@ -688,6 +763,66 @@ TEST_F(WsStreamingServerModuleTest, OlderScanQueuedLastDoesNotRestoreTheOldDomai
     EXPECT_EQ(client.announcementCount(valueId), 2u)
         << "announced again after the domain change: the older scan re-registered the signal with the old domain "
            "and the next scan re-registered it once more";
+
+    server.stop();
+}
+
+// A signal the I/O thread fails to register is skipped: the signals after it are still registered, and the
+// exception does not escape the I/O thread, which would terminate the process.
+TEST_F(WsStreamingServerModuleTest, SignalThatFailsToRegisterDoesNotStopTheOthers)
+{
+    const auto context = NullContext();
+    const auto module = CreateModule(context);
+    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
+    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
+    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7666), context);
+    auto& wsServer = static_cast<WsStreamingServer&>(*server.getObject()).getWsServer();
+    AvailableSignalsClient client{"ws://127.0.0.1:7666/"};
+
+    std::promise<std::thread::id> ioThread;
+    boost::asio::post(wsServer.executor(), [&ioThread] { ioThread.set_value(std::this_thread::get_id()); });
+
+    // the descriptor can be read during the scan on this thread, but not when the I/O thread registers the signal
+    const auto faulty = deviceImpl.addFaultySignal("faulty", ioThread.get_future().get());
+    // the next scan lists the healthy signal after the faulty one, so both are registered in the same pass
+    const auto healthyId = deviceImpl.addTestSignal("healthy");
+
+    EXPECT_TRUE(client.waitAvailable(healthyId));
+    // signals are registered in order, so the faulty one would have been announced before the healthy one
+    EXPECT_FALSE(client.isAvailable(faulty.getGlobalId().toStdString()));
+    EXPECT_GE(static_cast<FaultySignal&>(*faulty.getObject()).failures.load(), 1)
+        << "the I/O thread never failed to read the descriptor, so nothing was tested";
+
+    server.stop();
+}
+
+// A listener that cannot connect to its signal leaves that subscription without data, but the exception does not
+// escape the I/O thread, which would terminate the process; the server keeps serving the client.
+TEST_F(WsStreamingServerModuleTest, SubscriptionWhoseListenerFailsToConnectDoesNotStopTheServer)
+{
+    const auto context = NullContext();
+    const auto module = CreateModule(context);
+    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
+    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
+    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+
+    const auto faulty = deviceImpl.addFaultySignal("faulty");
+    auto& faultyImpl = static_cast<FaultySignal&>(*faulty.getObject());
+    faultyImpl.listenerConnectedFails = true;
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7667), context);
+    const auto faultyId = faulty.getGlobalId().toStdString();
+    AvailableSignalsClient client{"ws://127.0.0.1:7667/"};
+    ASSERT_TRUE(client.waitAvailable(faultyId));
+
+    // the server creates the listener when the subscription arrives and confirms it only afterwards
+    EXPECT_TRUE(client.subscribe(faultyId));
+    EXPECT_EQ(faultyImpl.failures.load(), 1) << "the listener never tried to connect, so nothing was tested";
+
+    const auto markerId = deviceImpl.addTestSignal("marker");
+    EXPECT_TRUE(client.waitAvailable(markerId));
 
     server.stop();
 }

@@ -145,6 +145,7 @@ class WsStreamingServer : public Server
         };
 
         DevicePtr _rootDevice;
+        LoggerComponentPtr loggerComponent;
         boost::asio::io_context _ioc;
         wss::server _server;
         std::thread _thread;

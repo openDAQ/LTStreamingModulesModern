@@ -22,6 +22,7 @@
 #include <boost/system/error_code.hpp>
 
 #include <opendaq/connected_client_info.h>
+#include <opendaq/custom_log.h>
 #include <opendaq/network_interface.h>
 #include <opendaq/device_info_internal_ptr.h>
 #include <opendaq/opendaq.h>
@@ -184,6 +185,7 @@ WsStreamingServer::WsStreamingServer(
         const ContextPtr& context)
     : Server{ID, config, rootDevice, context}
     , _rootDevice{rootDevice}
+    , loggerComponent{context.getLogger().getOrAddComponent("StreamingLTServer")}
     , _ioc{1}
     , _server{_ioc.get_executor()}
 {
@@ -504,12 +506,27 @@ void WsStreamingServer::createListener(const SignalSnapshot& snapshot)
         signal_id = snapshot.id
     ]()
     {
-        streamableSignal.listener = createWithImplementation<IInputPortNotifications, WsStreamingListener>(
-            this->template thisPtr<ComponentPtr>().getContext(),
-            signal,
-            streamableSignal.localSignal,
-            _server.executor());
-        reinterpret_cast<WsStreamingListener *>(streamableSignal.listener.getObject())->start();
+        // Runs inside ws-streaming's subscribe handling on the I/O thread, which an exception would end, and the
+        // process with it. The subscription stays, without data.
+        try
+        {
+            streamableSignal.listener = createWithImplementation<IInputPortNotifications, WsStreamingListener>(
+                this->template thisPtr<ComponentPtr>().getContext(),
+                signal,
+                streamableSignal.localSignal,
+                _server.executor());
+            reinterpret_cast<WsStreamingListener *>(streamableSignal.listener.getObject())->start();
+        }
+        catch (const std::exception& e)
+        {
+            streamableSignal.listener.release();
+            LOG_W("Signal {} is subscribed, but its data cannot be streamed: {}", signal_id, e.what());
+        }
+        catch (...)
+        {
+            streamableSignal.listener.release();
+            LOG_W("Signal {} is subscribed, but its data cannot be streamed", signal_id);
+        }
     });
 
     streamableSignal.localSignal->on_unsubscribed.connect([
@@ -639,7 +656,20 @@ void WsStreamingServer::applySignals(std::uint64_t scan, const std::vector<Signa
     }
 
     for (const auto& snapshot : snapshots)
-        createListener(snapshot);
+    {
+        try
+        {
+            createListener(snapshot);
+        }
+        catch (const std::exception& e)
+        {
+            LOG_W("Signal {} cannot be published: {}", snapshot.id, e.what());
+        }
+        catch (...)
+        {
+            LOG_W("Signal {} cannot be published", snapshot.id);
+        }
+    }
 }
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
