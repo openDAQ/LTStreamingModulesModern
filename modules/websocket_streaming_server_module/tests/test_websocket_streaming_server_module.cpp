@@ -1,5 +1,117 @@
 #include "test_websocket_streaming_server_module.h"
 
+#include <condition_variable>
+#include <future>
+#include <mutex>
+#include <set>
+#include <thread>
+
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
+
+#include <opendaq/data_descriptor_factory.h>
+#include <opendaq/device_impl.h>
+#include <opendaq/device_info_factory.h>
+
+#include <ws-streaming/client.hpp>
+#include <ws-streaming/connection.hpp>
+#include <ws-streaming/local_signal.hpp>
+#include <ws-streaming/metadata_builder.hpp>
+
+using namespace std::chrono_literals;
+
+namespace
+{
+
+    // A root device whose signals the test adds from its own thread.
+    class SignalAddingDevice : public Device
+    {
+    public:
+        explicit SignalAddingDevice(const ContextPtr& context)
+            : Device(context, nullptr, "dev")
+        {
+        }
+
+        std::string addTestSignal(const std::string& localId)
+        {
+            return createAndAddSignal(localId, DataDescriptorBuilder().setSampleType(SampleType::Float64).build())
+            .getGlobalId()
+                .toStdString();
+        }
+
+        SignalConfigPtr addSignal(const std::string& localId, const DataDescriptorPtr& descriptor)
+        {
+            return createAndAddSignal(localId, descriptor);
+        }
+
+    protected:
+        DeviceInfoPtr onGetInfo() override
+        {
+            return DeviceInfo("daqtest://dev");
+        }
+    };
+
+    // Connects to the LT server and records the ids of the signals it announces.
+    class AvailableSignalsClient
+    {
+    public:
+        explicit AvailableSignalsClient(const std::string& url)
+        {
+            client.async_connect(url,
+                                 [this](const boost::system::error_code& ec, wss::connection_ptr c)
+                                 {
+                                     if (ec)
+                                         return;
+                                     connection = c;
+                                     onAvailable = c->on_available.connect(
+                                         [this](wss::remote_signal_ptr signal)
+                                         {
+                                             std::scoped_lock lock(mutex);
+                                             available.insert(signal->id());
+                                             announced.notify_all();
+                                         });
+                                 });
+            thread = std::thread{[this] { ioc.run(); }};
+        }
+
+        ~AvailableSignalsClient()
+        {
+            boost::asio::post(ioc,
+                              [this]
+                              {
+                                  onAvailable.disconnect();
+                                  if (connection)
+                                      connection->close();
+                                  ioc.stop();
+                              });
+            thread.join();
+        }
+
+        bool isAvailable(const std::string& id)
+        {
+            std::scoped_lock lock(mutex);
+            return available.count(id) > 0;
+        }
+
+        bool waitAvailable(const std::string& id)
+        {
+            std::unique_lock lock(mutex);
+            return announced.wait_for(lock, 5s, [&] { return available.count(id) > 0; });
+        }
+
+    private:
+        boost::asio::io_context ioc;
+        wss::client client{ioc.get_executor()};
+        wss::connection_ptr connection;
+        boost::signals2::scoped_connection onAvailable;
+        std::mutex mutex;
+        std::condition_variable announced;
+        std::set<std::string> available;
+        std::thread thread;
+    };
+
+}
+
 TEST_F(WsStreamingServerModuleTest, CreateModule)
 {
     IModule* module = nullptr;
@@ -355,4 +467,109 @@ TEST_F(WsStreamingServerModuleTest, ProviderOptionsIgnoreUnknownKeys)
 #endif
     ASSERT_FALSE(config.hasProperty("NoSuchProperty"));
     ASSERT_EQ(config.getPropertyValue(PROPERTY_WS_STREAMING_PORT_SERVER), 7661);
+}
+
+// The ws-streaming server is not thread-safe: a signal added on another thread is registered on its I/O thread
+TEST_F(WsStreamingServerModuleTest, SignalAddedOnAnotherThreadIsAnnouncedFromTheServerThread)
+{
+    const auto context = NullContext();
+    const auto module = CreateModule(context);
+    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
+    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
+    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+    const auto initialId = deviceImpl.addTestSignal("initial");
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7662), context);
+    auto& wsServer = static_cast<WsStreamingServer&>(*server.getObject()).getWsServer();
+
+    AvailableSignalsClient client{"ws://127.0.0.1:7662/"};
+    ASSERT_TRUE(client.waitAvailable(initialId));
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    boost::asio::post(wsServer.executor(),
+        [&entered, released = release.get_future()]
+        {
+            entered.set_value();
+            released.wait();
+        });
+    entered.get_future().wait();
+
+    const auto addedId = deviceImpl.addTestSignal("added");
+
+    // With its I/O thread blocked the server is this thread's alone: the marker goes out on the socket now,
+    // after anything that adding the signal wrote from this thread
+    wss::local_signal marker{"marker", wss::metadata_builder{"marker"}.build()};
+    wsServer.add_local_signal(marker);
+    const bool markerAnnounced = client.waitAvailable("marker");
+    const bool announcedWhileServerThreadBlocked = client.isAvailable(addedId);
+    wsServer.remove_local_signal(marker);
+    release.set_value();
+
+    ASSERT_TRUE(markerAnnounced) << "the marker written from the test thread never reached the client";
+    EXPECT_FALSE(announcedWhileServerThreadBlocked) << "the signal was announced from the thread that added it";
+    EXPECT_TRUE(client.waitAvailable(addedId));
+
+    server.stop();
+}
+
+// The scan no longer builds metadata: a domain signal without a descriptor is skipped instead of throwing
+TEST_F(WsStreamingServerModuleTest, DomainSignalWithoutDescriptorDoesNotHideItsValueSignal)
+{
+    const auto context = NullContext();
+    const auto module = CreateModule(context);
+    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
+    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
+    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+
+    const auto domain = deviceImpl.addSignal("domain", nullptr);
+    const auto value = deviceImpl.addSignal("value", DataDescriptorBuilder().setSampleType(SampleType::Float64).build());
+    value.setDomainSignal(domain);
+
+    ServerPtr server;
+    ASSERT_NO_THROW(
+        server = (createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7663), context)));
+
+    AvailableSignalsClient client{"ws://127.0.0.1:7663/"};
+    EXPECT_TRUE(client.waitAvailable(value.getGlobalId().toStdString()));
+    // a domain signal is registered, and so announced, before the signals that use it
+    EXPECT_FALSE(client.isAvailable(domain.getGlobalId().toStdString()));
+
+    server.stop();
+}
+
+// The I/O thread reads the descriptor when it registers a signal: one cleared after the scan is not announced
+TEST_F(WsStreamingServerModuleTest, SignalWhoseDescriptorIsClearedBeforeRegistrationIsNotAnnounced)
+{
+    const auto context = NullContext();
+    const auto module = CreateModule(context);
+    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
+    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
+    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7664), context);
+    auto& wsServer = static_cast<WsStreamingServer&>(*server.getObject()).getWsServer();
+    AvailableSignalsClient client{"ws://127.0.0.1:7664/"};
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    boost::asio::post(wsServer.executor(),
+        [&entered, released = release.get_future()]
+        {
+            entered.set_value();
+            released.wait();
+        });
+    entered.get_future().wait();
+
+    // the scan sees the descriptor; it is gone by the time the I/O thread registers the signal
+    const auto cleared = deviceImpl.addSignal("cleared", DataDescriptorBuilder().setSampleType(SampleType::Float64).build());
+    cleared.setDescriptor(nullptr);
+    release.set_value();
+
+    // signals are registered in order, so the cleared one would be announced before the marker
+    const auto markerId = deviceImpl.addTestSignal("marker");
+    EXPECT_TRUE(client.waitAvailable(markerId));
+    EXPECT_FALSE(client.isAvailable(cleared.getGlobalId().toStdString()));
+
+    server.stop();
 }
