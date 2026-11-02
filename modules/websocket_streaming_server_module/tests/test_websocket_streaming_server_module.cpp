@@ -826,3 +826,29 @@ TEST_F(WsStreamingServerModuleTest, SubscriptionWhoseListenerFailsToConnectDoesN
 
     server.stop();
 }
+
+// A signal is published only with a descriptor: one added without it is announced once the descriptor is set
+TEST_F(WsStreamingServerModuleTest, SignalIsAnnouncedOnceItGetsADescriptor)
+{
+    const auto context = NullContext();
+    const auto module = CreateModule(context);
+    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
+    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
+    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7668), context);
+    AvailableSignalsClient client{"ws://127.0.0.1:7668/"};
+
+    const auto late = deviceImpl.addSignal("late", nullptr);
+    const auto lateId = late.getGlobalId().toStdString();
+    // signals are registered in order, so the late one would be announced before the marker
+    const auto markerId = deviceImpl.addTestSignal("marker");
+    ASSERT_TRUE(client.waitAvailable(markerId));
+    ASSERT_FALSE(client.isAvailable(lateId)) << "the signal was published without a descriptor";
+
+    // the only change: no component is added or removed, no attribute changes
+    late.setDescriptor(DataDescriptorBuilder().setSampleType(SampleType::Float64).build());
+    EXPECT_TRUE(client.waitAvailable(lateId));
+
+    server.stop();
+}

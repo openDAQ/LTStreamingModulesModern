@@ -122,6 +122,10 @@ class WsStreamingServer : public Server
             ComponentPtr& component,
             CoreEventArgsPtr& args);
 
+        void onDataDescriptorChanged(
+            ComponentPtr& component,
+            CoreEventArgsPtr& args);
+
         void rescan();
         void applySignals(std::uint64_t scan, const std::vector<SignalSnapshot>& snapshots);
 

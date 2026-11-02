@@ -592,6 +592,7 @@ void WsStreamingServer::onCoreEvent(
         case CoreEventId::ComponentRemoved:     return onComponentRemoved(component, args);
         case CoreEventId::ComponentUpdateEnd:   return onComponentUpdateEnd(component, args);
         case CoreEventId::AttributeChanged:     return onAttributeChanged(component, args);
+        case CoreEventId::DataDescriptorChanged: return onDataDescriptorChanged(component, args);
         default: break;
     }
 }
@@ -618,6 +619,14 @@ void WsStreamingServer::onComponentUpdateEnd(
 }
 
 void WsStreamingServer::onAttributeChanged(
+    ComponentPtr& component,
+    CoreEventArgsPtr& args)
+{
+    rescan();
+}
+
+// only signals with a descriptor are published, so one that has just got its first is new to the scan
+void WsStreamingServer::onDataDescriptorChanged(
     ComponentPtr& component,
     CoreEventArgsPtr& args)
 {
