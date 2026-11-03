@@ -146,6 +146,9 @@ class WsStreamingServer : public Server
             SignalPtr openDaqSignal;
             InputPortNotificationsPtr listener;
             SignalPtr domainSignal;
+            // The domain signal's registration at the time this signal was registered; empty if the domain
+            // signal was not registered then (e.g. it had no descriptor yet).
+            std::weak_ptr<wss::local_signal> domainLocalSignal;
         };
 
         DevicePtr _rootDevice;

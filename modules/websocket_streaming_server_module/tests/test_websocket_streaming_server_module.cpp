@@ -852,3 +852,43 @@ TEST_F(WsStreamingServerModuleTest, SignalIsAnnouncedOnceItGetsADescriptor)
 
     server.stop();
 }
+
+// Clients link a signal to its domain signal when it is announced. A value signal published before its domain signal
+// is announced again once the domain signal is published, so that clients can link the two.
+TEST_F(WsStreamingServerModuleTest, ValueSignalIsAnnouncedAgainOnceItsDomainSignalIsPublished)
+{
+    const auto context = NullContext();
+    const auto module = CreateModule(context);
+    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
+    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
+    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+
+    // without a descriptor the domain signal is not published, but the value signal is
+    const auto domain = deviceImpl.addSignal("domain", nullptr);
+    const auto value = deviceImpl.addSignal("value", DataDescriptorBuilder().setSampleType(SampleType::Float64).build());
+    value.setDomainSignal(domain);
+    const auto domainId = domain.getGlobalId().toStdString();
+    const auto valueId = value.getGlobalId().toStdString();
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7669), context);
+    AvailableSignalsClient client{"ws://127.0.0.1:7669/"};
+    ASSERT_TRUE(client.waitAvailable(valueId));
+    // a domain signal is registered, and so announced, before the signals that use it
+    ASSERT_FALSE(client.isAvailable(domainId));
+
+    // while the domain signal stays unpublished, further scans leave the value signal alone
+    const auto unchangedId = deviceImpl.addTestSignal("unchanged");
+    ASSERT_TRUE(client.waitAvailable(unchangedId));
+    EXPECT_EQ(client.announcementCount(valueId), 1u) << "the value signal was announced again on an unrelated scan";
+
+    domain.setDescriptor(DataDescriptorBuilder().setSampleType(SampleType::Int64).build());
+    ASSERT_TRUE(client.waitAvailable(domainId));
+
+    // the value signal is announced again right after its domain signal; the marker is announced after both
+    const auto markerId = deviceImpl.addTestSignal("marker");
+    ASSERT_TRUE(client.waitAvailable(markerId));
+    EXPECT_EQ(client.announcementCount(valueId), 2u)
+        << "the value signal was not announced again, so clients keep it without its domain signal";
+
+    server.stop();
+}

@@ -473,9 +473,22 @@ void WsStreamingServer::createListener(const SignalSnapshot& snapshot)
     // Check if the signal has acquired a new/different domain signal since it was added. If
     // so, we need to unregister the local_signal from ws-streaming and re-register it so that
     // the domain tab table is linked correctly.
+    //
+    // The same holds if the domain signal has been registered, for the first time or again, since
+    // the signal was: clients link a signal to its domain when it is announced. The scan lists a
+    // domain signal before the signals that use it, so its registration is already done here.
+
+    std::shared_ptr<wss::local_signal> domainLocalSignal;
+    if (snapshot.domainSignal.assigned())
+    {
+        auto jt = _localSignals.find(snapshot.domainSignal.getGlobalId());
+        if (jt != _localSignals.end() && jt->second.openDaqSignal.getObject() == snapshot.domainSignal.getObject())
+            domainLocalSignal = jt->second.localSignal;
+    }
 
     auto it = _localSignals.find(snapshot.id);
-    if (it != _localSignals.end() && snapshot.domainSignal.getObject() == it->second.domainSignal.getObject())
+    if (it != _localSignals.end() && snapshot.domainSignal.getObject() == it->second.domainSignal.getObject()
+        && domainLocalSignal == it->second.domainLocalSignal.lock())
         return;
 
     const auto descriptor = signal.getDescriptor();
@@ -499,6 +512,7 @@ void WsStreamingServer::createListener(const SignalSnapshot& snapshot)
         .first->second;
 
     streamableSignal.domainSignal = snapshot.domainSignal;
+    streamableSignal.domainLocalSignal = domainLocalSignal;
 
     streamableSignal.localSignal->on_subscribed.connect([
         =,
