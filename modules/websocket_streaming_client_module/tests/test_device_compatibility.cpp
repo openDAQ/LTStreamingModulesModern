@@ -60,6 +60,7 @@ class FakeLtPeer
             unsigned dropSubscribeRequests = 0;     // ignore this many leading value-signal subscribe requests
             bool streamData = false;                // stream value-signal data while it is subscribed
             bool outOfOrderUnsubscribe = false;     // defer a value-signal unsubscribe behind the next request
+            std::string relationType = "time";      // "relatedSignals" type of the time signal ("domain" per specification)
         };
 
         explicit FakeLtPeer(Options options)
@@ -340,7 +341,7 @@ class FakeLtPeer
             peer->send_metadata(valueSigno, "signal", {
                 { "tableId", tableId },
                 { "relatedSignals", {
-                    { { "type", "time" }, { "signalId", timeSignalId } },
+                    { { "type", options.relationType }, { "signalId", timeSignalId } },
                 } },
                 { "definition", {
                     { "name", valueSignalId },
@@ -491,6 +492,20 @@ TEST_F(DeviceCompatibilityTest, HiddenDomainSignalIsLinked)
 
     ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
     ASSERT_EQ(valueSignal.getDomainSignal(), timeSignal);
+}
+
+TEST_F(DeviceCompatibilityTest, HiddenDomainSignalIsLinkedThroughDomainRelation)
+{
+    FakeLtPeer::Options options;
+    options.relationType = "domain";
+
+    FakeLtPeer peer(options);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_EQ(valueSignal.getDomainSignal(), findSignalByName(signals, "CH1.time"));
 }
 
 TEST_F(DeviceCompatibilityTest, DomainMetadataArrivingLateIsStillLinked)
