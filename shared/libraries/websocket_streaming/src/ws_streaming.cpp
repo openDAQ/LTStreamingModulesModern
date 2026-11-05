@@ -425,6 +425,7 @@ void WsStreaming::subscribeRemoteSignal(const std::string& signalId)
         LOG_I("Found signal, subscribing");
         signalIt->second->ptr->subscribe();
         signalIt->second->isSubscribed = true;
+        signalIt->second->ackPending = true;
     }
 
     else
@@ -448,6 +449,8 @@ void WsStreaming::unsubscribeRemoteSignal(const std::string& signalId)
 
         LOG_I("Found signal, unsubscribing");
         signalIt->second->ptr->unsubscribe();
+        signalIt->second->isSubscribed = false;
+        signalIt->second->ackPending = true;
     }
 
     else
@@ -624,9 +627,10 @@ void WsStreaming::onRemoteSignalSubscribed(std::weak_ptr<WsStreamingRemoteSignal
 
     LOG_I("Signal subscribed: {}", entry->ptr->id());
 
-    if (entry->isPublished)
+    // only an ack answering openDAQ's latest request reaches openDAQ, not those of fetches or replaced requests
+    if (entry->isSubscribed && entry->ackPending)
     {
-        entry->isSubscribed = true;
+        entry->ackPending = false;
         triggerSubscribeAck(entry->ptr->id(), true);
     }
 }
@@ -647,6 +651,7 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
 
         if (entry->domainEntry)
         {
+            entry->domainEntry->isDomain = true;
             LOG_D("Signal {} domain now points to {}", entry->ptr->id(), entry->domainEntry->ptr->id());
         }
         else
@@ -820,7 +825,9 @@ void WsStreaming::onRemoteSignalDataReceived(
     if (!entry)
         return;
 
-    if (!entry->isSubscribed)
+    // readers get only the data of openDAQ's acknowledged subscribe: the fetch's data, or data from before a resubscribe
+    // took effect, would reach them as a domain gap; domain signals, which openDAQ does not subscribe, feed their dependents
+    if (!entry->descriptor.assigned() || (!entry->isDomain && (!entry->isSubscribed || entry->ackPending)))
         return;
 
     DataPacketPtr domainPacket;
@@ -885,9 +892,9 @@ void WsStreaming::onRemoteSignalUnsubscribed(std::weak_ptr<WsStreamingRemoteSign
         entry->ptr->unsubscribe();
     }
 
-    if (entry->isSubscribed)
+    if (!entry->isSubscribed && entry->ackPending)
     {
-        entry->isSubscribed = false;
+        entry->ackPending = false;
         triggerSubscribeAck(entry->ptr->id(), false);
     }
 }

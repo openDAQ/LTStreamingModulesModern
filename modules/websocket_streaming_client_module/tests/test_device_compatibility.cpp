@@ -10,13 +10,16 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <future>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <thread>
@@ -62,6 +65,8 @@ class FakeLtPeer
             unsigned dropSubscribeRequests = 0;     // ignore this many leading value-signal subscribe requests
             bool streamData = false;                // stream value-signal data while it is subscribed
             bool outOfOrderUnsubscribe = false;     // defer a value-signal unsubscribe behind the next request
+            std::chrono::milliseconds requestDelay{0};  // run requests one by one, each this long after the previous
+            bool explicitTime = false;              // the time signal carries explicit timestamps instead of a linear rule
         };
 
         explicit FakeLtPeer(Options options)
@@ -70,6 +75,7 @@ class FakeLtPeer
                 boost::asio::ip::make_address("127.0.0.1"), 0))
             , timer(ioc)
             , dataTimer(ioc)
+            , requestTimer(ioc)
         {
             acceptor.async_accept(
                 [this](const boost::system::error_code& ec, boost::asio::ip::tcp::socket socket)
@@ -203,6 +209,33 @@ class FakeLtPeer
             if (method != "request" || !params.is_object())
                 return;
 
+            if (options.requestDelay.count() == 0)
+                return runRequest(params);
+
+            delayedRequests.push_back(params);
+            if (delayedRequests.size() == 1)
+                runDelayedRequest();
+        }
+
+        void runDelayedRequest()
+        {
+            requestTimer.expires_after(options.requestDelay);
+            requestTimer.async_wait(
+                [this](const boost::system::error_code& ec)
+                {
+                    if (ec)
+                        return;
+
+                    runRequest(delayedRequests.front());
+                    delayedRequests.pop_front();
+
+                    if (!delayedRequests.empty())
+                        runDelayedRequest();
+                });
+        }
+
+        void runRequest(const nlohmann::json& params)
+        {
             const auto id = params.value<nlohmann::json>("id", nullptr);
             const std::string rpcMethod = params.value("method", std::string());
 
@@ -229,6 +262,7 @@ class FakeLtPeer
                 }
 
                 valueSubscribed = true;
+                streamStart = sampleIndexNow();
                 respond(id, true);
                 sendValueSignalFamily();
 
@@ -296,10 +330,21 @@ class FakeLtPeer
             });
         }
 
+        // The device's sample clock runs at 5 kHz whether or not anybody is subscribed; a new stream starts where it stands
+        std::int64_t sampleIndexNow() const
+        {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - created).count() * 5;
+        }
+
         void startStreamingData()
         {
             // give the linear time table its start point, then pump value samples periodically
-            peer->send_data(timeSigno, boost::asio::buffer(&timeStart, sizeof(timeStart)));
+            if (!options.explicitTime)
+            {
+                timeStart = { streamStart, streamStart };
+                peer->send_data(timeSigno, boost::asio::buffer(&timeStart, sizeof(timeStart)));
+            }
+
             sendValueData();
         }
 
@@ -308,6 +353,9 @@ class FakeLtPeer
             if (!valueSubscribed)
                 return;
 
+            // an explicit time signal sends a timestamp for each value sample, ahead of the values
+            if (options.explicitTime)
+                peer->send_data(timeSigno, boost::asio::buffer(timeSamples));
             peer->send_data(valueSigno, boost::asio::buffer(valueSamples));
 
             dataTimer.expires_after(20ms);
@@ -355,6 +403,7 @@ class FakeLtPeer
         {
             peer->send_metadata(valueSigno, "signal", {
                 { "tableId", tableId },
+                { "valueIndex", streamStart },
                 { "relatedSignals", {
                     { { "type", "time" }, { "signalId", timeSignalId } },
                 } },
@@ -371,15 +420,23 @@ class FakeLtPeer
             if (options.withholdTimeMetadata)
                 return;
 
+            nlohmann::json definition = {
+                { "name", timeSignalId },
+                { "rule", "linear" },
+                { "linear", { { "delta", 1 } } },
+                { "dataType", "uint64" },
+                { "resolution", { { "num", 1 }, { "denom", 1000 } } },
+            };
+
+            if (options.explicitTime)
+            {
+                definition["rule"] = "explicit";
+                definition.erase("linear");
+            }
+
             peer->send_metadata(timeSigno, "signal", {
                 { "tableId", tableId },
-                { "definition", {
-                    { "name", timeSignalId },
-                    { "rule", "linear" },
-                    { "linear", { { "delta", 1 } } },
-                    { "dataType", "uint64" },
-                    { "resolution", { { "num", 1 }, { "denom", 1000 } } },
-                } },
+                { "definition", definition },
             });
         }
 
@@ -395,11 +452,22 @@ class FakeLtPeer
         boost::asio::ip::tcp::acceptor acceptor;
         boost::asio::steady_timer timer;
         boost::asio::steady_timer dataTimer;
+        boost::asio::steady_timer requestTimer;
         std::thread thread;
 
+        std::deque<nlohmann::json> delayedRequests;  // only touched on the ioc thread
+        const std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
+        std::int64_t streamStart = 0;                // only touched on the ioc thread
+
         // sent by reference from the asynchronous send_data(), so they must outlive the calls
-        const wss::detail::streaming_protocol::linear_payload timeStart{0, 0};
+        wss::detail::streaming_protocol::linear_payload timeStart{0, 0};
         const std::vector<float> valueSamples = std::vector<float>(100, 1.0f);
+        const std::vector<std::uint64_t> timeSamples = []
+        {
+            std::vector<std::uint64_t> samples(100);
+            std::iota(samples.begin(), samples.end(), 1000);
+            return samples;
+        }();
 
         bool valueSubscribed = false;  // only touched on the ioc thread
         std::optional<nlohmann::json> pendingValueUnsubscribeId;
@@ -489,6 +557,16 @@ auto buildStreamReader(const SignalPtr& signal)
         .setDomainReadType(daq::SampleType::Int64)
         .setSkipEvents(true)
         .build();
+}
+
+// Waits up to the timeout for count samples (or a domain gap) and discards what it read; returns how many it read
+template <typename Reader>
+SizeT readSamples(Reader& reader, SizeT count, std::chrono::milliseconds timeout)
+{
+    std::vector<double> values(count);
+    std::vector<std::int64_t> domain(count);
+    reader.readWithDomain(values.data(), domain.data(), &count, static_cast<SizeT>(timeout.count()));
+    return count;
 }
 
 // Creates the streaming object on its own, without the device that normally owns it
@@ -629,6 +707,118 @@ TEST_F(DeviceCompatibilityTest, DataKeepsFlowingWhenDeviceReordersUnsubscribeAnd
 
     std::this_thread::sleep_for(500ms);
     EXPECT_GT(reader.getAvailableCount(), 0u);
+}
+
+// openDAQ unsubscribes and subscribes again before the device answers; the subscribe must still go out
+TEST_F(DeviceCompatibilityTest, ResubscribeWithinOneRoundTripKeepsDataFlowing)
+{
+    FakeLtPeer::Options options;
+    options.streamData = true;
+    FakeLtPeer peer(options);
+
+    // outlive the instance, whose I/O thread raises the acks
+    std::atomic<unsigned> subscribeAcks{0};
+    std::promise<void> resubscribed;
+
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+    valueSignal.asPtr<IMirroredSignalConfig>().getOnSubscribeComplete() +=
+        [&](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr&) { if (++subscribeAcks == 2) resubscribed.set_value(); };
+
+    auto reader = buildStreamReader(valueSignal);
+    ASSERT_EQ(readSamples(reader, 1, 10s), 1u) << "no data before the resubscribe";
+
+    // releasing the reader unsubscribes, and the next reader subscribes within the same round trip
+    reader.release();
+    reader = buildStreamReader(valueSignal);
+
+    ASSERT_EQ(resubscribed.get_future().wait_for(10s), std::future_status::ready) << "the resubscribe was never acknowledged";
+    if (const SizeT count = reader.getAvailableCount(); count > 0)
+        readSamples(reader, count, 0ms);
+
+    EXPECT_EQ(readSamples(reader, 1, 10s), 1u) << "no data after the resubscribe";
+}
+
+// The old stream flows until the device has run the unsubscribe, and the resubscribe starts a new one where the
+// device's clock stands: data of the old stream must not reach the new reader, or it sees a domain gap
+TEST_F(DeviceCompatibilityTest, ResubscribeWithinOneRoundTripGetsNoDomainGap)
+{
+    FakeLtPeer::Options options;
+    options.streamData = true;
+    options.requestDelay = 200ms;  // the device's pace, not a wait: the old stream flows while it runs the unsubscribe
+    FakeLtPeer peer(options);
+
+    // outlive the instance, whose I/O thread raises the acks
+    std::atomic<unsigned> subscribeAcks{0};
+    std::promise<void> resubscribed;
+
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+    valueSignal.asPtr<IMirroredSignalConfig>().getOnSubscribeComplete() +=
+        [&](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr&) { if (++subscribeAcks == 2) resubscribed.set_value(); };
+
+    auto reader = buildStreamReader(valueSignal);
+    ASSERT_EQ(readSamples(reader, 1, 10s), 1u) << "the old stream does not flow";
+
+    reader.release();
+    reader = buildStreamReader(valueSignal);
+
+    // a gap shows where the new stream starts, so read until the new stream has delivered two packets
+    auto resubscribedFuture = resubscribed.get_future();
+    std::vector<double> values(100);
+    std::vector<std::int64_t> domain(100);
+    SizeT samples = 0;
+    SizeT samplesAfterResubscribe = 0;
+
+    for (const auto deadline = std::chrono::steady_clock::now() + 10s;
+         samplesAfterResubscribe < 200 && std::chrono::steady_clock::now() < deadline;)
+    {
+        const bool resubscribedBefore = resubscribedFuture.wait_for(0s) == std::future_status::ready;
+        SizeT count = values.size();
+        const auto status = reader.readWithDomain(values.data(), domain.data(), &count, 100);
+        samples += count;
+        if (resubscribedBefore)
+            samplesAfterResubscribe += count;
+
+        if (status.getReadStatus() == ReadStatus::Event)
+            ASSERT_NE(status.getEventPacket().getEventId(), event_packet_id::IMPLICIT_DOMAIN_GAP_DETECTED)
+                << "after " << samples << " samples";
+    }
+
+    EXPECT_GE(samplesAfterResubscribe, 200u);
+}
+
+// openDAQ never subscribes a domain signal itself, yet the data of an explicit one must reach the values it times
+TEST_F(DeviceCompatibilityTest, ExplicitDomainValuesReachTheReader)
+{
+    FakeLtPeer::Options options;
+    options.streamData = true;
+    options.explicitTime = true;
+    FakeLtPeer peer(options);
+
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
+
+    auto reader = buildStreamReader(valueSignal);
+
+    std::vector<double> values(100);
+    std::vector<std::int64_t> domain(100, -1);
+    SizeT count = values.size();
+    reader.readWithDomain(values.data(), domain.data(), &count, 10000);
+
+    ASSERT_GT(count, 0u);
+    for (SizeT i = 0; i < count; ++i)
+        ASSERT_TRUE(domain[i] >= 1000 && domain[i] < 1100) << "sample " << i << " has the domain value " << domain[i];
 }
 
 // A remote unsubscribe must end the held fetch subscription; a takeover of it would never get data
