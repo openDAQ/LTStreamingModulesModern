@@ -66,6 +66,11 @@ BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
  * counter and the linear rule parameters. The streaming object understands this and handles the
  * creation of synthetic domain packets.
  *
+ * A signal's domain signal is the advertised signal whose ID equals the signal's table ID, as
+ * openDAQ servers send it. Otherwise it is the signal named by the first "relatedSignals" entry
+ * of type "domain" (LT streaming specification) or "time", which the device may leave
+ * unadvertised.
+ *
  * This object creates a Boost.Asio I/O context (which is required by the ws-streaming library),
  * and manages a std::thread to pump it. The thread is automatically stopped and destroyed when
  * the streaming object is destroyed.
@@ -168,7 +173,7 @@ class WsStreaming : public Streaming
 
         void onRemoteSignalUnavailable(wss::remote_signal_ptr signal);
 
-        /*! @brief Finds a signal's domain entry by table ID or via "relatedSignals", discovering hidden domain signals on demand. */
+        /*! @brief Finds a signal's domain entry by table ID or via a "domain" or "time" entry in "relatedSignals", discovering hidden domain signals on demand. */
         std::shared_ptr<WsStreamingRemoteSignalEntry> resolveDomainEntry(
             const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 

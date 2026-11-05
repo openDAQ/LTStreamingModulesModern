@@ -514,7 +514,8 @@ std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::resolveDomainEntry(
     if (auto it = signals.find(tableId); it != signals.end() && it->second != entry)
         return it->second;
 
-    // other devices reference a hidden domain signal via "relatedSignals"
+    // other devices reference a hidden domain signal via "relatedSignals", with the relation type
+    // "domain" (LT streaming specification) or "time"
     std::string domainSignalId;
     const auto& metadataJson = entry->ptr->metadata().json();
 
@@ -522,12 +523,13 @@ std::shared_ptr<WsStreamingRemoteSignalEntry> WsStreaming::resolveDomainEntry(
             relatedIt != metadataJson.end() && relatedIt->is_array())
         for (const auto& related : *relatedIt)
             if (related.is_object()
-                    && related.value("type", std::string()) == "time"
+                    && (related.value("type", std::string()) == "domain"
+                        || related.value("type", std::string()) == "time")
                     && related.contains("signalId")
                     && related["signalId"].is_string())
             {
                 domainSignalId = related["signalId"];
-                break;  // first "time" entry wins
+                break;  // first domain entry wins
             }
 
     if (domainSignalId.empty() || domainSignalId == entry->ptr->id())
