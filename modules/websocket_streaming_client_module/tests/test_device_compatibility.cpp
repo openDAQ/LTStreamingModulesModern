@@ -61,6 +61,9 @@ class FakeLtPeer
             bool streamData = false;                // stream value-signal data while it is subscribed
             bool outOfOrderUnsubscribe = false;     // defer a value-signal unsubscribe behind the next request
             std::string relationType = "time";      // "relatedSignals" type of the time signal ("domain" per specification)
+            std::optional<std::int64_t> linearStart;  // the time signal's "linear.start"
+            bool startInInterpretation = false;     // send the start as an openDAQ server does: also in "interpretation", not in the data
+            std::string absoluteReference;          // the time signal's "absoluteReference", if not empty
         };
 
         explicit FakeLtPeer(Options options)
@@ -356,7 +359,7 @@ class FakeLtPeer
             if (options.withholdTimeMetadata)
                 return;
 
-            peer->send_metadata(timeSigno, "signal", {
+            nlohmann::json metadata = {
                 { "tableId", tableId },
                 { "definition", {
                     { "name", timeSignalId },
@@ -365,7 +368,18 @@ class FakeLtPeer
                     { "dataType", "uint64" },
                     { "resolution", { { "num", 1 }, { "denom", 1000 } } },
                 } },
-            });
+            };
+
+            if (options.linearStart)
+                metadata["definition"]["linear"]["start"] = *options.linearStart;
+            if (options.startInInterpretation)
+                metadata["interpretation"] = {
+                    { "rule", { { "type", 1 }, { "parameters", { { "delta", 1 }, { "start", options.linearStart.value_or(0) } } } } },
+                };
+            if (!options.absoluteReference.empty())
+                metadata["definition"]["absoluteReference"] = options.absoluteReference;
+
+            peer->send_metadata(timeSigno, "signal", metadata);
         }
 
         const std::string tableId = "CH1";
@@ -383,7 +397,9 @@ class FakeLtPeer
         std::thread thread;
 
         // sent by reference from the asynchronous send_data(), so they must outlive the calls
-        const wss::detail::streaming_protocol::linear_payload timeStart{0, 0};
+        // a peer following the specification sends the absolute start value; an openDAQ server sends the offset only
+        const wss::detail::streaming_protocol::linear_payload timeStart{
+            0, options.startInInterpretation ? 0 : options.linearStart.value_or(0)};
         const std::vector<float> valueSamples = std::vector<float>(100, 1.0f);
 
         bool valueSubscribed = false;  // only touched on the ioc thread
@@ -475,6 +491,22 @@ auto buildStreamReader(const SignalPtr& signal)
         .build();
 }
 
+// Subscribes the signal and returns the domain value of the first sample it delivers
+std::optional<std::int64_t> readFirstDomainValue(const SignalPtr& signal)
+{
+    auto reader = buildStreamReader(signal);
+
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (reader.getAvailableCount() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(20ms);
+
+    SizeT count = 1;
+    double value;
+    std::int64_t domain;
+    reader.readWithDomain(&value, &domain, &count);
+    return count == 1 ? std::optional(domain) : std::nullopt;
+}
+
 }  // namespace
 
 using DeviceCompatibilityTest = testing::Test;
@@ -506,6 +538,58 @@ TEST_F(DeviceCompatibilityTest, HiddenDomainSignalIsLinkedThroughDomainRelation)
     auto valueSignal = findSignalByName(signals, "CH1.value");
     ASSERT_TRUE(valueSignal.assigned());
     ASSERT_EQ(valueSignal.getDomainSignal(), findSignalByName(signals, "CH1.time"));
+}
+
+// The specification's "linear.start" is the absolute value of the next sample
+TEST_F(DeviceCompatibilityTest, AbsoluteLinearStartIsNotAddedTwice)
+{
+    constexpr std::int64_t start = 5003;  // not a multiple of the 100-sample packets
+
+    FakeLtPeer::Options options;
+    options.relationType = "domain";
+    options.streamData = true;
+    options.linearStart = start;
+    options.absoluteReference = "1970-01-01T00:00:00.0";
+
+    FakeLtPeer peer(options);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
+
+    auto domainDescriptor = valueSignal.getDomainSignal().getDescriptor();
+    EXPECT_EQ(static_cast<Int>(domainDescriptor.getRule().getParameters().get("start")), 0);
+    EXPECT_EQ(domainDescriptor.getOrigin().toStdString(), "1970-01-01T00:00:00.0");
+
+    auto domain = readFirstDomainValue(valueSignal);
+    ASSERT_TRUE(domain.has_value());
+    EXPECT_GE(*domain, start);
+    EXPECT_EQ((*domain - start) % 100, 0);
+}
+
+// openDAQ servers send their rule start in "interpretation" and only the offset in the data
+TEST_F(DeviceCompatibilityTest, OpenDaqServerLinearStartIsKept)
+{
+    constexpr std::int64_t start = 5003;
+
+    FakeLtPeer::Options options;
+    options.streamData = true;
+    options.linearStart = start;
+    options.startInInterpretation = true;
+
+    FakeLtPeer peer(options);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
+
+    auto domainDescriptor = valueSignal.getDomainSignal().getDescriptor();
+    EXPECT_EQ(static_cast<Int>(domainDescriptor.getRule().getParameters().get("start")), start);
+
+    auto domain = readFirstDomainValue(valueSignal);
+    ASSERT_TRUE(domain.has_value());
+    EXPECT_GE(*domain, start);
+    EXPECT_EQ((*domain - start) % 100, 0);
 }
 
 TEST_F(DeviceCompatibilityTest, DomainMetadataArrivingLateIsStillLinked)
