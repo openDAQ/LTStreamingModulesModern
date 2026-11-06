@@ -860,24 +860,29 @@ TEST_P(DeviceCompatibilityTest, HiddenDomainFoundAfterPublicationIsLinked)
         findSignalByName(device.getSignals(search::Recursive(search::Any())), "CH1.time"));
 }
 
-TEST_P(DeviceCompatibilityTest, DroppedSubscribeRequestIsRetried)
+// The device may have run a request whose connection closed unanswered, so sending it again could run it twice:
+// a dropped metadata fetch is final, and its signal is not published
+TEST_P(DeviceCompatibilityTest, DroppedSubscribeRequestIsNotSentAgain)
 {
     if (GetParam() == CommandTransport::InBand)
         GTEST_SKIP() << "no device drops in-band requests";
 
     auto options = peerOptions();
     options.dropSubscribeRequests = 1;
-
     FakeLtPeer peer(options);
 
-    // ws-streaming resends a request whose connection closes unanswered
-    auto [instance, device, signals] = connectAndWaitForSignals(peer);
-    ASSERT_EQ(signals.getCount(), 2u);
-    ASSERT_EQ(peer.subscribeRequestCount(), 2u);
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
+    ASSERT_TRUE(waitUntil([&] { return peer.subscribeRequestCount() >= 1; })) << "the metadata fetch never started";
 
-    auto valueSignal = findSignalByName(signals, "CH1.value");
-    ASSERT_TRUE(valueSignal.assigned());
-    ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
+    // requests go one at a time, so the time signal's fetch, sent from now on, reaches the device after any resend
+    peer.advertiseTimeSignal();
+    // a resent fetch would have published the value signal and linked the time signal, which then needs no fetch
+    ASSERT_TRUE(waitUntil([&] { return peer.timeSubscribeRequestCount() >= 1; }))
+        << "the time signal was never fetched; value signal subscribe requests: " << peer.subscribeRequestCount();
+
+    EXPECT_EQ(peer.subscribeRequestCount(), 1u);
+    EXPECT_FALSE(findSignalByName(device.getSignals(search::Recursive(search::Any())), "CH1.value").assigned());
 }
 
 TEST_P(DeviceCompatibilityTest, ReadvertisedHiddenDomainSignalStartsNoNewFetch)
@@ -1208,7 +1213,7 @@ TEST_P(DeviceCompatibilityTest, ClosingDoesNotWaitForAnUnansweredRequest)
     auto options = peerOptions();
     options.requestDelay = 1h;  // the device never gets round to the metadata fetch's subscribe
 
-    // a stalled runner slows one teardown; a missing cancel slows every one by an HTTP request's 2 s timeout
+    // a stalled runner slows one teardown; a missing cancel holds every one until the HTTP client's 30 s deadline
     auto fastest = std::chrono::milliseconds::max();
     for (int run = 0; run < 3 && fastest >= 1000ms; ++run)
     {
