@@ -168,12 +168,12 @@ namespace
                                              signal->on_subscribed.connect(
                                                  [this, id = signal->id()]
                                                  {
-                                                     std::scoped_lock lock(mutex);
+                                                     std::scoped_lock lock(this->mutex);
                                                      subscribed.insert(id);
                                                      changed.notify_all();
                                                  });
 
-                                             std::scoped_lock lock(mutex);
+                                             std::scoped_lock lock(this->mutex);
                                              ++announcements[signal->id()];
                                              changed.notify_all();
                                          });
