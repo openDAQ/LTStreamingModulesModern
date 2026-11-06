@@ -25,6 +25,7 @@
 #include <thread>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/signals2/connection.hpp>
 #include <boost/signals2/signal.hpp>
 #include <boost/system/error_code.hpp>
@@ -223,6 +224,14 @@ class WsStreaming : public Streaming
         bool isSecureChannel = false;
 
         boost::asio::io_context ioContext;
+
+        /**
+         * Runs openDAQ's subscribe and unsubscribe requests in the order openDAQ makes them. It makes
+         * them under its streaming lock, but on any thread, the I/O thread included, and a post made
+         * on the I/O thread can run after one made later on another thread.
+         */
+        boost::asio::strand<boost::asio::io_context::executor_type> requestStrand{boost::asio::make_strand(ioContext)};
+
         std::thread thread;
 
         wss::client wsClient;

@@ -365,15 +365,15 @@ void WsStreaming::onRemoveSignal(const MirroredSignalConfigPtr& signal)
 
 void WsStreaming::onSubscribeSignal(const StringPtr& signalId)
 {
-    // called on application threads; the signals map may only be touched on the I/O thread
-    boost::asio::post(ioContext,
+    // called on any thread; the signals map may only be touched on the I/O thread (see requestStrand)
+    boost::asio::post(requestStrand,
         [this, id = signalId.toStdString()] { subscribeRemoteSignal(id); });
 }
 
 void WsStreaming::onUnsubscribeSignal(const StringPtr& signalId)
 {
-    // called on application threads; the signals map may only be touched on the I/O thread
-    boost::asio::post(ioContext,
+    // called on any thread; the signals map may only be touched on the I/O thread (see requestStrand)
+    boost::asio::post(requestStrand,
         [this, id = signalId.toStdString()] { unsubscribeRemoteSignal(id); });
 }
 

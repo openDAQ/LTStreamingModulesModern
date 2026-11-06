@@ -976,6 +976,7 @@ TEST_P(DeviceCompatibilityTest, ResubscribeWithinOneRoundTripKeepsDataFlowing)
 {
     auto options = peerOptions();
     options.streamData = true;
+    options.requestDelay = 100ms;  // the device's pace, not a wait: the round trip of the unsubscribe stays open
     FakeLtPeer peer(options);
 
     // outlive the instance, whose I/O thread raises the acks
@@ -993,8 +994,12 @@ TEST_P(DeviceCompatibilityTest, ResubscribeWithinOneRoundTripKeepsDataFlowing)
     auto reader = buildStreamReader(valueSignal);
     ASSERT_EQ(readSamples(reader, 1, 10s), 1u) << "no data before the resubscribe";
 
-    // releasing the reader unsubscribes, and the next reader subscribes within the same round trip
+    // Releasing the reader unsubscribes once the reader is gone, which a packet in delivery can delay; a reader
+    // connected before that would share the subscription. So the next reader subscribes once the unsubscribe
+    // reached the device, which has not answered it yet.
+    const auto requestsBefore = peer.receivedRequestCount();
     reader.release();
+    ASSERT_TRUE(waitUntil([&] { return peer.receivedRequestCount() > requestsBefore; })) << "the unsubscribe never went out";
     reader = buildStreamReader(valueSignal);
 
     ASSERT_EQ(resubscribed.get_future().wait_for(10s), std::future_status::ready) << "the resubscribe was never acknowledged";
@@ -1002,6 +1007,67 @@ TEST_P(DeviceCompatibilityTest, ResubscribeWithinOneRoundTripKeepsDataFlowing)
         readSamples(reader, count, 0ms);
 
     EXPECT_EQ(readSamples(reader, 1, 10s), 1u) << "no data after the resubscribe";
+}
+
+// A reader destroyed on the I/O thread (its last reference held by a packet in delivery) unsubscribes from there, and
+// a reader connected right after subscribes from another thread: the subscribe must not run first, or it is refused
+// as a duplicate and the unsubscribe that follows ends the new reader's data
+TEST_P(DeviceCompatibilityTest, UnsubscribeFromTheIoThreadAndSubscribeElsewhereRunInOrder)
+{
+    auto options = peerOptions();
+    options.streamData = true;
+    FakeLtPeer peer(options);
+
+    // outlive the instance, whose I/O thread raises the acks
+    std::mutex readerMutex;
+    std::optional<decltype(buildStreamReader(SignalPtr()))> firstReader;
+    std::promise<void> firstReleased;
+    std::promise<void> secondConnected;
+    auto secondConnectedFuture = secondConnected.get_future();
+    std::promise<void> resubscribed;
+    std::atomic<unsigned> subscribeAcks{0};
+
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
+    auto valueSignal = waitForSignal(device, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+
+    valueSignal.asPtr<IMirroredSignalConfig>().getOnSubscribeComplete() +=
+        [&](MirroredSignalConfigPtr&, SubscriptionEventArgsPtr&)
+        {
+            const unsigned ack = ++subscribeAcks;
+            if (ack == 1)
+            {
+                // on the I/O thread: the first reader unsubscribes from here, and the second subscribes meanwhile
+                {
+                    std::scoped_lock lock(readerMutex);
+                    firstReader.reset();
+                }
+                firstReleased.set_value();
+                secondConnectedFuture.wait_for(10s);
+            }
+            else if (ack == 2)
+            {
+                resubscribed.set_value();
+            }
+        };
+
+    {
+        std::scoped_lock lock(readerMutex);
+        firstReader = buildStreamReader(valueSignal);
+    }
+
+    ASSERT_EQ(firstReleased.get_future().wait_for(10s), std::future_status::ready) << "the first subscribe was never acknowledged";
+    auto secondReader = buildStreamReader(valueSignal);
+    secondConnected.set_value();
+
+    ASSERT_EQ(resubscribed.get_future().wait_for(10s), std::future_status::ready) << "the second subscribe was never acknowledged";
+
+    // a read stops at a domain gap, which the old stream's last packets can leave in front of the new stream
+    SizeT samples = 0;
+    for (const auto deadline = std::chrono::steady_clock::now() + 10s; samples == 0 && std::chrono::steady_clock::now() < deadline;)
+        samples = readSamples(secondReader, 1, 100ms);
+    EXPECT_EQ(samples, 1u) << "no data for the second reader";
 }
 
 // The old stream flows until the device has run the unsubscribe, and the resubscribe starts a new one where the
@@ -1028,7 +1094,10 @@ TEST_P(DeviceCompatibilityTest, ResubscribeWithinOneRoundTripGetsNoDomainGap)
     auto reader = buildStreamReader(valueSignal);
     ASSERT_EQ(readSamples(reader, 1, 10s), 1u) << "the old stream does not flow";
 
+    // the next reader subscribes once the unsubscribe reached the device (see ResubscribeWithinOneRoundTripKeepsDataFlowing)
+    const auto requestsBefore = peer.receivedRequestCount();
     reader.release();
+    ASSERT_TRUE(waitUntil([&] { return peer.receivedRequestCount() > requestsBefore; })) << "the unsubscribe never went out";
     reader = buildStreamReader(valueSignal);
 
     // a gap shows where the new stream starts, so read until the new stream has delivered two packets
