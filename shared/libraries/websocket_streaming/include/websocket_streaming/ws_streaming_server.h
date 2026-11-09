@@ -16,10 +16,13 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/signals2/connection.hpp>
@@ -81,7 +84,16 @@ class WsStreamingServer : public Server
         void addCapability();
         void removeCapability();
 
-        void createListener(const SignalPtr& signal);
+        // A signal as read from the device tree, so the I/O thread can register it without the tree's locks
+        struct SignalSnapshot
+        {
+            SignalPtr signal;
+            SignalPtr domainSignal;
+            std::string id;
+        };
+
+        std::vector<SignalSnapshot> scanSignals();
+        void createListener(const SignalSnapshot& snapshot);
 
         void onClientConnected(
             const wss::connection_ptr& connection);
@@ -110,7 +122,12 @@ class WsStreamingServer : public Server
             ComponentPtr& component,
             CoreEventArgsPtr& args);
 
+        void onDataDescriptorChanged(
+            ComponentPtr& component,
+            CoreEventArgsPtr& args);
+
         void rescan();
+        void applySignals(std::uint64_t scan, const std::vector<SignalSnapshot>& snapshots);
 
     private:
 
@@ -129,13 +146,20 @@ class WsStreamingServer : public Server
             SignalPtr openDaqSignal;
             InputPortNotificationsPtr listener;
             SignalPtr domainSignal;
+            // The domain signal's registration at the time this signal was registered; empty if the domain
+            // signal was not registered then (e.g. it had no descriptor yet).
+            std::weak_ptr<wss::local_signal> domainLocalSignal;
         };
 
         DevicePtr _rootDevice;
+        LoggerComponentPtr loggerComponent;
         boost::asio::io_context _ioc;
         wss::server _server;
         std::thread _thread;
         std::map<std::string, StreamableSignal> _localSignals;
+        // Scans are numbered on the threads that run them; only the I/O thread uses the last applied number
+        std::atomic<std::uint64_t> _scanCount{0};
+        std::uint64_t _appliedScan{0};
         Int _ws_port{0};
         Int _wss_port{0};
         std::string _path;

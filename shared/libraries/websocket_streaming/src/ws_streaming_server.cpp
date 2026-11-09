@@ -22,6 +22,7 @@
 #include <boost/system/error_code.hpp>
 
 #include <opendaq/connected_client_info.h>
+#include <opendaq/custom_log.h>
 #include <opendaq/network_interface.h>
 #include <opendaq/device_info_internal_ptr.h>
 #include <opendaq/opendaq.h>
@@ -184,6 +185,7 @@ WsStreamingServer::WsStreamingServer(
         const ContextPtr& context)
     : Server{ID, config, rootDevice, context}
     , _rootDevice{rootDevice}
+    , loggerComponent{context.getLogger().getOrAddComponent("StreamingLTServer")}
     , _ioc{1}
     , _server{_ioc.get_executor()}
 {
@@ -438,62 +440,113 @@ void WsStreamingServer::removeCapability()
         info.asPtr<IDeviceInfoInternal>(true).removeServerCapability(CONST_LTS_STREAMING_ID);
 }
 
-void WsStreamingServer::createListener(const SignalPtr& signal)
+std::vector<WsStreamingServer::SignalSnapshot> WsStreamingServer::scanSignals()
 {
-    SignalPtr domainSignal = signal.getDomainSignal();
+    std::vector<SignalSnapshot> snapshots;
 
-    if (domainSignal.assigned())
-        createListener(domainSignal);
+    // domain signals are listed before the signals that use them
+    const std::function<void(const SignalPtr&)> add = [&](const SignalPtr& signal)
+    {
+        SignalPtr domainSignal = signal.getDomainSignal();
+        if (domainSignal.assigned())
+            add(domainSignal);
 
-    auto it = _localSignals.find(signal.getGlobalId());
+        snapshots.push_back({signal, domainSignal, signal.getGlobalId()});
+    };
+
+    auto items = _rootDevice.getItems(search::Recursive(search::Any()));
+    for (const auto& item : items)
+        if (auto signal = item.asPtrOrNull<daq::ISignal>(); signal.assigned() && signal.getDescriptor().assigned())
+            add(signal);
+
+    return snapshots;
+}
+
+void WsStreamingServer::createListener(const SignalSnapshot& snapshot)
+{
+    const SignalPtr& signal = snapshot.signal;
+
+    // the snapshot may predate a removal on another thread
+    if (signal.isRemoved())
+        return;
+
+    // Check if the signal has acquired a new/different domain signal since it was added. If
+    // so, we need to unregister the local_signal from ws-streaming and re-register it so that
+    // the domain tab table is linked correctly.
+    //
+    // The same holds if the domain signal has been registered, for the first time or again, since
+    // the signal was: clients link a signal to its domain when it is announced. The scan lists a
+    // domain signal before the signals that use it, so its registration is already done here.
+
+    std::shared_ptr<wss::local_signal> domainLocalSignal;
+    if (snapshot.domainSignal.assigned())
+    {
+        auto jt = _localSignals.find(snapshot.domainSignal.getGlobalId());
+        if (jt != _localSignals.end() && jt->second.openDaqSignal.getObject() == snapshot.domainSignal.getObject())
+            domainLocalSignal = jt->second.localSignal;
+    }
+
+    auto it = _localSignals.find(snapshot.id);
+    if (it != _localSignals.end() && snapshot.domainSignal.getObject() == it->second.domainSignal.getObject()
+        && domainLocalSignal == it->second.domainLocalSignal.lock())
+        return;
+
+    const auto descriptor = signal.getDescriptor();
+    if (!descriptor.assigned())
+        return;
+
     if (it != _localSignals.end())
     {
-        // Check if the signal has acquired a new/different domain signal since it was added. If
-        // so, we need to unregister the local_signal from ws-streaming and re-register it so that
-        // the domain tab table is linked correctly.
-
-        if (domainSignal != it->second.domainSignal)
-        {
-            _server.remove_local_signal(*it->second.localSignal);
-            _localSignals.erase(it);
-        }
-
-        else
-        {
-            return;
-        }
+        _server.remove_local_signal(*it->second.localSignal);
+        _localSignals.erase(it);
     }
 
     auto& streamableSignal = _localSignals.emplace(
             std::piecewise_construct,
             std::forward_as_tuple(
-                signal.getGlobalId()),
+                snapshot.id),
             std::forward_as_tuple(
-                signal.getGlobalId(),
-                daq::websocket_streaming::descriptorToMetadata(signal, signal.getDescriptor()),
+                snapshot.id,
+                daq::websocket_streaming::descriptorToMetadata(signal, descriptor),
                 signal))
         .first->second;
 
-    streamableSignal.domainSignal = domainSignal;
+    streamableSignal.domainSignal = snapshot.domainSignal;
+    streamableSignal.domainLocalSignal = domainLocalSignal;
 
     streamableSignal.localSignal->on_subscribed.connect([
         =,
         &streamableSignal,
-        signal_id = signal.getGlobalId().toStdString()
+        signal_id = snapshot.id
     ]()
     {
-        streamableSignal.listener = createWithImplementation<IInputPortNotifications, WsStreamingListener>(
-            this->template thisPtr<ComponentPtr>().getContext(),
-            signal,
-            streamableSignal.localSignal,
-            _server.executor());
-        reinterpret_cast<WsStreamingListener *>(streamableSignal.listener.getObject())->start();
+        // Runs inside ws-streaming's subscribe handling on the I/O thread, which an exception would end, and the
+        // process with it. The subscription stays, without data.
+        try
+        {
+            streamableSignal.listener = createWithImplementation<IInputPortNotifications, WsStreamingListener>(
+                this->template thisPtr<ComponentPtr>().getContext(),
+                signal,
+                streamableSignal.localSignal,
+                _server.executor());
+            reinterpret_cast<WsStreamingListener *>(streamableSignal.listener.getObject())->start();
+        }
+        catch (const std::exception& e)
+        {
+            streamableSignal.listener.release();
+            LOG_W("Signal {} is subscribed, but its data cannot be streamed: {}", signal_id, e.what());
+        }
+        catch (...)
+        {
+            streamableSignal.listener.release();
+            LOG_W("Signal {} is subscribed, but its data cannot be streamed", signal_id);
+        }
     });
 
     streamableSignal.localSignal->on_unsubscribed.connect([
         =,
         &streamableSignal,
-        signal_id = signal.getGlobalId().toStdString()
+        signal_id = snapshot.id
     ]()
     {
         streamableSignal.listener.release();
@@ -553,6 +606,7 @@ void WsStreamingServer::onCoreEvent(
         case CoreEventId::ComponentRemoved:     return onComponentRemoved(component, args);
         case CoreEventId::ComponentUpdateEnd:   return onComponentUpdateEnd(component, args);
         case CoreEventId::AttributeChanged:     return onAttributeChanged(component, args);
+        case CoreEventId::DataDescriptorChanged: return onDataDescriptorChanged(component, args);
         default: break;
     }
 }
@@ -585,8 +639,31 @@ void WsStreamingServer::onAttributeChanged(
     rescan();
 }
 
+// only signals with a descriptor are published, so one that has just got its first is new to the scan
+void WsStreamingServer::onDataDescriptorChanged(
+    ComponentPtr& component,
+    CoreEventArgsPtr& args)
+{
+    rescan();
+}
+
+// The I/O thread owns the ws-streaming server but must not lock the tree: removing the server joins it under that lock
 void WsStreamingServer::rescan()
 {
+    // numbered before the tree is read: a scan sees every change made before a lower number was taken
+    const auto scan = ++_scanCount;
+    boost::asio::post(_ioc, [this, scan, snapshots = scanSignals()] { applySignals(scan, snapshots); });
+}
+
+void WsStreamingServer::applySignals(std::uint64_t scan, const std::vector<SignalSnapshot>& snapshots)
+{
+    // Scans from different threads are queued in any order. One older than the last applied scan is
+    // dropped: whatever it saw that the newer one missed was changed later, and that change is
+    // followed by a scan of its own.
+    if (scan < _appliedScan)
+        return;
+    _appliedScan = scan;
+
     auto it = _localSignals.begin();
     while (it != _localSignals.end())
     {
@@ -601,10 +678,21 @@ void WsStreamingServer::rescan()
             ++it;
     }
 
-    auto items = _rootDevice.getItems(search::Recursive(search::Any()));
-    for (const auto& item : items)
-        if (auto signal = item.asPtrOrNull<daq::ISignal>(); signal.assigned() && signal.getDescriptor().assigned())
-            createListener(signal);
+    for (const auto& snapshot : snapshots)
+    {
+        try
+        {
+            createListener(snapshot);
+        }
+        catch (const std::exception& e)
+        {
+            LOG_W("Signal {} cannot be published: {}", snapshot.id, e.what());
+        }
+        catch (...)
+        {
+            LOG_W("Signal {} cannot be published", snapshot.id);
+        }
+    }
 }
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
