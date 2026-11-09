@@ -392,8 +392,6 @@ void WsStreamingServer::addCapability()
     if (_ws_channel_enabled)
     {
         auto cap = ServerCapability(CONST_LT_STREAMING_ID, CONST_LT_STREAMING_ID, ProtocolType::Streaming);
-        cap.setProtocolGroupId(CONST_LT_PROTOCOL_GROUP_ID);
-        cap.setProtocolSecurityLevel(CONST_LT_STREAMING_SECURITY_LVL);
         cap.setPrefix(CONST_LT_STREAMING_PREFIX);
         cap.setPort(_ws_port);
         cap.setConnectionType("TCP/IP");
@@ -405,8 +403,6 @@ void WsStreamingServer::addCapability()
     if (_wss_channel_enabled)
     {
         auto cap = ServerCapability(CONST_LTS_STREAMING_ID, CONST_LTS_STREAMING_ID, ProtocolType::Streaming);
-        cap.setProtocolGroupId(CONST_LT_PROTOCOL_GROUP_ID);
-        cap.setProtocolSecurityLevel(CONST_LTS_STREAMING_SECURITY_LVL);
         cap.setPrefix(CONST_LTS_STREAMING_PREFIX);
         cap.setPort(_wss_port);
         cap.setConnectionType("TCP/IP");
