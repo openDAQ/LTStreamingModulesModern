@@ -16,6 +16,10 @@
 
 #pragma once
 
+#include <cstdint>
+#include <map>
+#include <vector>
+
 #include <opendaq/opendaq.h>
 
 #include <boost/signals2/connection.hpp>
@@ -66,6 +70,15 @@ struct WsStreamingRemoteSignalEntry
     bool ackPending = false;    /**< The device has not yet acknowledged openDAQ's latest request. */
     bool fetching = false;      /**< The subscription that fetches the signal's metadata is open. */
     bool isDomain = false;      /**< Another signal uses this one as its domain signal. */
+
+    /**
+     * A constant-rule signal's values by the domain value they hold from; the first one also holds before its key.
+     * The "constant/start" of the metadata is kept under the lowest possible key.
+     */
+    std::map<std::int64_t, std::vector<std::uint8_t>> constantValues;
+
+    /** The domain packet the constant-rule signal's last packet was built on; each one gets one packet. */
+    DataPacketPtr constantDomainPacket;
 };
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING

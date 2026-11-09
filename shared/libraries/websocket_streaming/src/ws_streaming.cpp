@@ -17,8 +17,12 @@
 #include <algorithm>
 #include <cstring>
 #include <functional>
+#include <iterator>
+#include <limits>
+#include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/asio/error.hpp>
@@ -44,6 +48,122 @@
 using namespace std::placeholders;
 
 BEGIN_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING
+
+namespace
+{
+
+using ConstantValues = std::map<std::int64_t, std::vector<std::uint8_t>>;
+
+template <typename T>
+T constantValue(const std::vector<std::uint8_t>& bytes)
+{
+    T value{};
+    std::memcpy(&value, bytes.data(), std::min(bytes.size(), sizeof(T)));
+    return value;
+}
+
+// The packet over a domain packet that starts at 'start': the value that holds at the start (the first of 'values'),
+// then each later value up to the packet's last sample at the first sample its domain value reaches
+template <typename T>
+DataPacketPtr typedConstantPacket(
+    const DataPacketPtr& domainPacket,
+    const DataDescriptorPtr& descriptor,
+    std::int64_t start,
+    std::int64_t delta,
+    const ConstantValues& values)
+{
+    const std::int64_t count = domainPacket.getSampleCount();
+    const std::int64_t end = start + (count - 1) * delta;
+
+    auto it = values.begin();
+    const T initial = constantValue<T>(it->second);
+
+    std::vector<ConstantPosAndValue<T>> changes;
+    for (++it; it != values.end() && it->first <= end; ++it)
+    {
+        const auto pos = static_cast<std::uint32_t>((it->first - start + delta - 1) / delta);
+        if (!changes.empty() && changes.back().pos == pos)
+            changes.back().value = constantValue<T>(it->second);
+        else
+            changes.push_back({pos, constantValue<T>(it->second)});
+    }
+
+    return ConstantDataPacketWithDomain<T>(domainPacket, descriptor, static_cast<std::uint64_t>(count), initial, changes);
+}
+
+// nullptr for a sample type without constant-rule packets
+DataPacketPtr constantPacket(
+    const DataPacketPtr& domainPacket,
+    const DataDescriptorPtr& descriptor,
+    std::int64_t start,
+    std::int64_t delta,
+    const ConstantValues& values)
+{
+    switch (descriptor.getSampleType())
+    {
+        case SampleType::Int8:      return typedConstantPacket<std::int8_t>(domainPacket, descriptor, start, delta, values);
+        case SampleType::UInt8:     return typedConstantPacket<std::uint8_t>(domainPacket, descriptor, start, delta, values);
+        case SampleType::Int16:     return typedConstantPacket<std::int16_t>(domainPacket, descriptor, start, delta, values);
+        case SampleType::UInt16:    return typedConstantPacket<std::uint16_t>(domainPacket, descriptor, start, delta, values);
+        case SampleType::Int32:     return typedConstantPacket<std::int32_t>(domainPacket, descriptor, start, delta, values);
+        case SampleType::UInt32:    return typedConstantPacket<std::uint32_t>(domainPacket, descriptor, start, delta, values);
+        case SampleType::Int64:     return typedConstantPacket<std::int64_t>(domainPacket, descriptor, start, delta, values);
+        case SampleType::UInt64:    return typedConstantPacket<std::uint64_t>(domainPacket, descriptor, start, delta, values);
+        case SampleType::Float32:   return typedConstantPacket<float>(domainPacket, descriptor, start, delta, values);
+        case SampleType::Float64:   return typedConstantPacket<double>(domainPacket, descriptor, start, delta, values);
+        default:                    return nullptr;
+    }
+}
+
+template <typename T>
+std::vector<std::uint8_t> constantBytes(const nlohmann::json& number)
+{
+    const T value = number.get<T>();
+    const auto *bytes = reinterpret_cast<const std::uint8_t *>(&value);
+    return {bytes, bytes + sizeof(T)};
+}
+
+// The value of the metadata's "constant/start" in the descriptor's sample type, or nothing when it has none
+std::vector<std::uint8_t> constantStart(const nlohmann::json& metadata, SampleType sampleType)
+{
+    const auto pointer = nlohmann::json::json_pointer("/definition/constant/start");
+    if (!metadata.contains(pointer) || !metadata[pointer].is_number())
+        return {};
+
+    const auto& start = metadata[pointer];
+    switch (sampleType)
+    {
+        case SampleType::Int8:      return constantBytes<std::int8_t>(start);
+        case SampleType::UInt8:     return constantBytes<std::uint8_t>(start);
+        case SampleType::Int16:     return constantBytes<std::int16_t>(start);
+        case SampleType::UInt16:    return constantBytes<std::uint16_t>(start);
+        case SampleType::Int32:     return constantBytes<std::int32_t>(start);
+        case SampleType::UInt32:    return constantBytes<std::uint32_t>(start);
+        case SampleType::Int64:     return constantBytes<std::int64_t>(start);
+        case SampleType::UInt64:    return constantBytes<std::uint64_t>(start);
+        case SampleType::Float32:   return constantBytes<float>(start);
+        case SampleType::Float64:   return constantBytes<double>(start);
+        default:                    return {};
+    }
+}
+
+bool isConstantRule(const DataDescriptorPtr& descriptor)
+{
+    return descriptor.assigned() && descriptor.getRule().assigned() && descriptor.getRule().getType() == DataRuleType::Constant;
+}
+
+// A constant-rule signal starts over from the metadata's start value, if it has one
+void resetConstantValues(WsStreamingRemoteSignalEntry& entry)
+{
+    entry.constantValues.clear();
+    entry.constantDomainPacket = nullptr;
+
+    if (isConstantRule(entry.descriptor))
+        if (auto start = constantStart(entry.ptr->metadata().json(), entry.descriptor.getSampleType()); !start.empty())
+            entry.constantValues.emplace(std::numeric_limits<std::int64_t>::min(), std::move(start));
+}
+
+}
 
 #if DAQMODULES_LT_STREAMING_ENABLE_TLS
 
@@ -427,6 +547,9 @@ void WsStreaming::unsubscribeRemoteSignal(const std::string& signalId)
         signalIt->second->ptr->unsubscribe();
         signalIt->second->isSubscribed = false;
         signalIt->second->ackPending = true;
+
+        // a later subscribe must not start from a value of this one
+        resetConstantValues(*signalIt->second);
     }
 
     else
@@ -520,6 +643,7 @@ void WsStreaming::onRemoteSignalMetadataChanged(std::weak_ptr<WsStreamingRemoteS
         entry->lastPacket = nullptr;
         entry->descriptor = metadataToDescriptor(entry->ptr->metadata());
         entry->domainEntry = resolveDomainEntry(entry);
+        resetConstantValues(*entry);
 
         if (entry->domainEntry)
         {
@@ -681,6 +805,14 @@ void WsStreaming::onRemoteSignalDataReceived(
     if (!entry->descriptor.assigned() || (!entry->isDomain && (!entry->isSubscribed || entry->ackPending)))
         return;
 
+    // a constant-rule value holds from its domain value on; it gets its samples from the packets of its table
+    if (isConstantRule(entry->descriptor))
+    {
+        const auto *bytes = static_cast<const std::uint8_t *>(data);
+        entry->constantValues[domainValue].assign(bytes, bytes + size);
+        return;
+    }
+
     DataPacketPtr domainPacket;
     DataPacketPtr packet;
 
@@ -728,6 +860,45 @@ void WsStreaming::onRemoteSignalDataReceived(
 
     entry->lastPacket = packet;
     onPacket(entry->ptr->id(), packet);
+
+    if (domainPacket.assigned())
+        emitConstantPackets(entry->domainEntry, domainPacket);
+}
+
+void WsStreaming::emitConstantPackets(
+    const std::shared_ptr<WsStreamingRemoteSignalEntry>& domainEntry,
+    const DataPacketPtr& domainPacket)
+{
+    const auto domainRule = domainPacket.getDataDescriptor().getRule();
+    if (!domainRule.assigned() || domainRule.getType() != DataRuleType::Linear || !domainPacket.getOffset().assigned())
+        return;
+
+    const std::int64_t start = domainPacket.getOffset();
+    const Int delta = domainRule.getParameters().get("delta");
+    if (delta <= 0 || domainPacket.getSampleCount() == 0)
+        return;
+
+    for (const auto& [id, entry] : signals)
+    {
+        if (entry->domainEntry != domainEntry || !isConstantRule(entry->descriptor) || !entry->isPublished
+                || !entry->isSubscribed || entry->ackPending || entry->constantDomainPacket == domainPacket)
+            continue;
+
+        // the latest value at or before the start holds at the start; the ones before it are done with
+        auto& values = entry->constantValues;
+        auto first = values.upper_bound(start);
+        if (first == values.begin())
+            continue;  // no value is known yet: the signal gets no samples rather than made-up ones
+        values.erase(values.begin(), std::prev(first));
+
+        auto packet = constantPacket(domainPacket, entry->descriptor, start, delta, values);
+        if (!packet.assigned())
+            continue;
+
+        entry->constantDomainPacket = domainPacket;
+        entry->lastPacket = packet;
+        onPacket(id, packet);
+    }
 }
 
 void WsStreaming::onRemoteSignalUnsubscribed(std::weak_ptr<WsStreamingRemoteSignalEntry> weakEntry)

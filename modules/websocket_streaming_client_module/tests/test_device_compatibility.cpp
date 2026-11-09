@@ -103,6 +103,7 @@ class FakeLtPeer
             std::string absoluteReference;          // the time signal's "absoluteReference", if not empty
             bool statusSignal = false;              // also offer a constant-rule status signal on the value's table, as the
                                                     // FusionLN does; while subscribed it gets an entry after each value packet
+            std::optional<std::int64_t> statusStart;  // the status signal's "constant/start"
         };
 
         explicit FakeLtPeer(Options options)
@@ -474,11 +475,7 @@ class FakeLtPeer
                     { "relatedSignals", {
                         { { "type", options.relationType }, { "signalId", timeSignalId } },
                     } },
-                    { "definition", {
-                        { "name", statusSignalId },
-                        { "rule", "constant" },
-                        { "dataType", "int64" },
-                    } },
+                    { "definition", statusDefinition() },
                 });
             }
 
@@ -531,6 +528,18 @@ class FakeLtPeer
         std::int64_t sampleIndexNow() const
         {
             return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - created).count() * 5;
+        }
+
+        nlohmann::json statusDefinition() const
+        {
+            nlohmann::json definition = {
+                { "name", statusSignalId },
+                { "rule", "constant" },
+                { "dataType", "int64" },
+            };
+            if (options.statusStart)
+                definition["constant"] = { { "start", *options.statusStart } };
+            return definition;
         }
 
         void startStreamingData()
@@ -1508,4 +1517,86 @@ TEST_P(DeviceCompatibilityTest, ConstantSignalOnTheSameTableLeavesValueDomainPac
     }
 
     ASSERT_GE(valuePackets, 20u);
+}
+
+// Builds an Int64/Int64 stream reader on a constant-rule signal, subscribing it
+static StreamReaderPtr buildConstantReader(const SignalPtr& signal)
+{
+    return daq::StreamReaderBuilder()
+        .setSignal(signal)
+        .setValueReadType(daq::SampleType::Int64)
+        .setDomainReadType(daq::SampleType::Int64)
+        .setSkipEvents(true)
+        .build();
+}
+
+// Reads count samples with their domain values, or as many as arrive within 5 s
+static std::pair<std::vector<std::int64_t>, std::vector<std::int64_t>> readConstantSamples(StreamReaderPtr& reader, SizeT count)
+{
+    std::vector<std::int64_t> values(count);
+    std::vector<std::int64_t> domains(count);
+    SizeT read = 0;
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (read < count && std::chrono::steady_clock::now() < deadline)
+    {
+        SizeT chunk = count - read;
+        reader.readWithDomain(values.data() + read, domains.data() + read, &chunk, 100);
+        read += chunk;
+    }
+
+    values.resize(read);
+    domains.resize(read);
+    return {values, domains};
+}
+
+// A constant-rule signal gets a sample for each sample of its table, on the value signal's domain packets, from the
+// first packet at whose start a value is known: here the entry sent after the first value packet holds from the second
+TEST_P(DeviceCompatibilityTest, ConstantSignalSamplesFollowTheValueSignalsPackets)
+{
+    auto options = peerOptions();
+    options.streamData = true;
+    options.statusSignal = true;
+
+    FakeLtPeer peer(options);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 3);
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    auto statusSignal = findSignalByName(signals, "CH1.status");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_TRUE(statusSignal.assigned());
+
+    // the status signal is subscribed before the value signal's stream starts; the value signal's packets drive the table
+    auto statusReader = buildConstantReader(statusSignal);
+    auto valueReader = PacketReader(valueSignal);
+    auto [values, domains] = readConstantSamples(statusReader, 200);
+
+    ASSERT_EQ(values.size(), 200u);
+    EXPECT_EQ(std::count(values.begin(), values.end(), 42), 200);
+    EXPECT_EQ(domains.front(), peer.lastStreamStart() + 100);
+    for (std::size_t i = 1; i < domains.size(); ++i)
+        ASSERT_EQ(domains[i], domains[i - 1] + 1) << "sample " << i;
+}
+
+// The metadata's "constant/start" holds from the first packet until the first entry takes over
+TEST_P(DeviceCompatibilityTest, ConstantStartHoldsUntilTheFirstEntry)
+{
+    auto options = peerOptions();
+    options.streamData = true;
+    options.statusSignal = true;
+    options.statusStart = 7;
+
+    FakeLtPeer peer(options);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 3);
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    auto statusSignal = findSignalByName(signals, "CH1.status");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_TRUE(statusSignal.assigned());
+
+    auto statusReader = buildConstantReader(statusSignal);
+    auto valueReader = PacketReader(valueSignal);
+    auto [values, domains] = readConstantSamples(statusReader, 200);
+
+    ASSERT_EQ(values.size(), 200u);
+    EXPECT_EQ(domains.front(), peer.lastStreamStart());
+    EXPECT_EQ(std::count(values.begin(), values.begin() + 100, 7), 100);
+    EXPECT_EQ(std::count(values.begin() + 100, values.end(), 42), 100);
 }

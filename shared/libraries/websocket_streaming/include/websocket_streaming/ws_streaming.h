@@ -225,6 +225,11 @@ class WsStreaming : public Streaming
         /*! @brief Pushes the entry's cached descriptor into openDAQ as descriptor-changed events, propagating to signals that use it as their domain. */
         void emitDescriptorChangedEvents(const std::shared_ptr<WsStreamingRemoteSignalEntry>& entry);
 
+        /*! @brief Builds a packet over the domain packet for each subscribed constant-rule signal on the domain signal's table. */
+        void emitConstantPackets(
+            const std::shared_ptr<WsStreamingRemoteSignalEntry>& domainEntry,
+            const DataPacketPtr& domainPacket);
+
         std::string wsConnectionString;
         bool isSecureChannel = false;
 
