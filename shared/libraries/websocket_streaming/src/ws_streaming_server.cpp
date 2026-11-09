@@ -194,6 +194,10 @@ void WsStreamingServer::addCapability()
 
 void WsStreamingServer::createListener(const SignalPtr& signal)
 {
+    // Without a descriptor there is no way to know which kind of handler to create.
+    if (!signal.getDescriptor().assigned())
+        return;
+
     SignalPtr domainSignal = signal.getDomainSignal();
 
     if (domainSignal.assigned())
@@ -313,31 +317,46 @@ void WsStreamingServer::onComponentAdded(
     ComponentPtr& component,
     CoreEventArgsPtr& args)
 {
-    rescan();
+    // openDAQ holds the changed component's lock while core event handlers run, so scanning
+    // from the root here deadlocks against a thread holding any other device's lock.
+    // The sender is the parent the component was added to, so its subtree covers the new child.
+    if (auto folder = component.asPtrOrNull<daq::IFolder>(); folder.assigned())
+        rescan(folder);
 }
 
 void WsStreamingServer::onComponentRemoved(
     ComponentPtr& component,
     CoreEventArgsPtr& args)
 {
-    rescan();
+    pruneRemovedSignals();
 }
 
 void WsStreamingServer::onComponentUpdateEnd(
     ComponentPtr& component,
     CoreEventArgsPtr& args)
 {
-    rescan();
+    // Core events are muted for the whole subtree while it updates, so this is the only
+    // notification that anything below the component changed. An update both adds and
+    // removes signals.
+    if (auto folder = component.asPtrOrNull<daq::IFolder>(); folder.assigned())
+    {
+        pruneRemovedSignals();
+        rescan(folder);
+    }
+
+    else if (auto signal = component.asPtrOrNull<daq::ISignal>(); signal.assigned())
+        createListener(signal);
 }
 
 void WsStreamingServer::onAttributeChanged(
     ComponentPtr& component,
     CoreEventArgsPtr& args)
 {
-    rescan();
+    if (auto signal = component.asPtrOrNull<daq::ISignal>(); signal.assigned())
+        createListener(signal);
 }
 
-void WsStreamingServer::rescan()
+void WsStreamingServer::pruneRemovedSignals()
 {
     auto it = _localSignals.begin();
     while (it != _localSignals.end())
@@ -352,10 +371,19 @@ void WsStreamingServer::rescan()
         else
             ++it;
     }
+}
 
-    auto items = _rootDevice.getItems(search::Recursive(search::Any()));
+void WsStreamingServer::rescan()
+{
+    pruneRemovedSignals();
+    rescan(_rootDevice);
+}
+
+void WsStreamingServer::rescan(FolderPtr folder)
+{
+    auto items = folder.getItems(search::Recursive(search::Any()));
     for (const auto& item : items)
-        if (auto signal = item.asPtrOrNull<daq::ISignal>(); signal.assigned() && signal.getDescriptor().assigned())
+        if (auto signal = item.asPtrOrNull<daq::ISignal>(); signal.assigned())
             createListener(signal);
 }
 
