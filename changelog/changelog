@@ -2,6 +2,8 @@
 
 ## Bug fixes
 
+- [#35](https://github.com/openDAQ/LTStreamingModulesModern/pull/35) Link a signal to its hidden domain signal through a `relatedSignals` entry of type `domain`, the LT streaming specification's relation type, fixing devices whose signals had no domain signal; type `time` is still accepted.
+- [#35](https://github.com/openDAQ/LTStreamingModulesModern/pull/35) Take a linear domain signal's rule start only from the openDAQ `interpretation`, not from the LT streaming specification's `linear.start`, which is the absolute value of the next sample, fixing doubled timestamps from devices that send it.
 - [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Resolve hidden domain (time) signals referenced via the `relatedSignals` metadata element, fixing devices that connected successfully but delivered no data (signals had no domain signal).
 - [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Retry initial metadata-fetch subscribes via a sweep timer, fixing signals that silently never appeared on devices that drop concurrent command-interface requests.
 - [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Defer publishing a signal until its domain signal is published, so the domain link is not lost when metadata arrives out of order; signals whose domain signal never publishes are published without the link after a timeout, with a warning.
@@ -13,6 +15,7 @@
 
 ## Misc
 
+- [#35](https://github.com/openDAQ/LTStreamingModulesModern/pull/35) Bump ws-streaming to v3.1.3, which takes a time signal's origin from `absoluteReference` (LT streaming specification) when the device sends no `origin`, and no longer reads the specification's `linear.start` as a rule start.
 - [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Bump ws-streaming to v3.1.1, fixing warnings-as-errors builds (GCC `-Werror=reorder`, MSVC `/WX` C5038).
 
 - [#1](https://github.com/openDAQ/LTStreamingModulesModern/pull/1) Project initial version.

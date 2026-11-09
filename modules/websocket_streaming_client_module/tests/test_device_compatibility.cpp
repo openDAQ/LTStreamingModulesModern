@@ -95,6 +95,10 @@ class FakeLtPeer
             bool explicitTime = false;              // the time signal carries explicit timestamps instead of a linear rule
             bool rejectValueMetadata = false;       // give the value signal a tick resolution the client rejects
             bool timeSubscribeWithMetadata = false; // first mention the time signal with its metadata, not with the value's subscribe
+            std::string relationType = "time";      // "relatedSignals" type of the time signal ("domain" per specification)
+            std::optional<std::int64_t> linearStart;  // the time signal's "linear.start"
+            bool startInInterpretation = false;     // send the start as an openDAQ server does: also in "interpretation", not in the data
+            std::string absoluteReference;          // the time signal's "absoluteReference", if not empty
         };
 
         explicit FakeLtPeer(Options options)
@@ -187,6 +191,13 @@ class FakeLtPeer
         {
             std::scoped_lock lock(mutex);
             return timeMetadataSent;
+        }
+
+        // The sample index at which the latest value-signal stream started (the sample clock runs regardless)
+        std::int64_t lastStreamStart()
+        {
+            std::scoped_lock lock(mutex);
+            return lastStreamStartIndex;
         }
 
         // Advertises the previously hidden time signal in a second 'available' announcement
@@ -427,6 +438,10 @@ class FakeLtPeer
 
                 valueSubscribed = true;
                 streamStart = sampleIndexNow();
+                {
+                    std::scoped_lock lock(mutex);
+                    lastStreamStartIndex = streamStart;
+                }
                 reply(result(id));
                 sendValueSignalFamily();
 
@@ -488,7 +503,9 @@ class FakeLtPeer
             // give the linear time table its start point, then pump value samples periodically
             if (!options.explicitTime)
             {
-                timeStart = { streamStart, streamStart };
+                // a peer following the specification sends the absolute start value; an openDAQ server sends the offset only
+                const std::int64_t startOffset = options.startInInterpretation ? 0 : options.linearStart.value_or(0);
+                timeStart = { streamStart, streamStart + startOffset };
                 peer->send_data(timeSigno, boost::asio::buffer(&timeStart, sizeof(timeStart)));
             }
 
@@ -539,7 +556,7 @@ class FakeLtPeer
                 { "tableId", tableId },
                 { "valueIndex", streamStart },
                 { "relatedSignals", {
-                    { { "type", "time" }, { "signalId", timeSignalId } },
+                    { { "type", options.relationType }, { "signalId", timeSignalId } },
                 } },
                 { "definition", {
                     { "name", valueSignalId },
@@ -575,11 +592,23 @@ class FakeLtPeer
                 definition["rule"] = "explicit";
                 definition.erase("linear");
             }
+            else if (options.linearStart)
+                definition["linear"]["start"] = *options.linearStart;
 
-            peer->send_metadata(timeSigno, "signal", {
+            if (!options.absoluteReference.empty())
+                definition["absoluteReference"] = options.absoluteReference;
+
+            nlohmann::json metadata = {
                 { "tableId", tableId },
                 { "definition", definition },
-            });
+            };
+
+            if (options.startInInterpretation)
+                metadata["interpretation"] = {
+                    { "rule", { { "type", 1 }, { "parameters", { { "delta", 1 }, { "start", options.linearStart.value_or(0) } } } } },
+                };
+
+            peer->send_metadata(timeSigno, "signal", metadata);
 
             std::scoped_lock lock(mutex);
             ++timeMetadataSent;
@@ -633,6 +662,7 @@ class FakeLtPeer
         unsigned timeSubscribeRequests = 0;
         unsigned valueUnsubscribeRequests = 0;
         unsigned timeMetadataSent = 0;
+        std::int64_t lastStreamStartIndex = 0;
 };
 
 // An Instance owns the device so that teardown runs the device's removal path;
@@ -751,6 +781,22 @@ StreamingPtr createStreaming(const FakeLtPeer& peer)
         String("daq.lt://127.0.0.1:" + std::to_string(peer.port()) + "/"), NullContext(), nullptr);
 }
 
+// Subscribes the signal and returns the domain value of the first sample it delivers
+std::optional<std::int64_t> readFirstDomainValue(const SignalPtr& signal)
+{
+    auto reader = buildStreamReader(signal);
+
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (reader.getAvailableCount() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(20ms);
+
+    SizeT count = 1;
+    double value;
+    std::int64_t domain;
+    reader.readWithDomain(&value, &domain, &count);
+    return count == 1 ? std::optional(domain) : std::nullopt;
+}
+
 }  // namespace
 
 class DeviceCompatibilityTest : public testing::TestWithParam<CommandTransport>
@@ -799,6 +845,76 @@ TEST_P(DeviceCompatibilityTest, HiddenDomainSignalIsLinked)
 
     ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
     ASSERT_EQ(valueSignal.getDomainSignal(), timeSignal);
+}
+
+TEST_P(DeviceCompatibilityTest, HiddenDomainSignalIsLinkedThroughDomainRelation)
+{
+    auto options = peerOptions();
+    options.relationType = "domain";
+
+    FakeLtPeer peer(options);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    ASSERT_EQ(signals.getCount(), 2u);
+
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_EQ(valueSignal.getDomainSignal(), findSignalByName(signals, "CH1.time"));
+}
+
+// The specification's "linear.start" is the absolute value of the next sample
+TEST_P(DeviceCompatibilityTest, AbsoluteLinearStartIsNotAddedTwice)
+{
+    constexpr std::int64_t start = 5003;  // not a multiple of the 100-sample packets
+
+    auto options = peerOptions();
+    options.relationType = "domain";
+    options.streamData = true;
+    options.linearStart = start;
+    options.absoluteReference = "1970-01-01T00:00:00.0";
+
+    FakeLtPeer peer(options);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
+
+    auto domainDescriptor = valueSignal.getDomainSignal().getDescriptor();
+    EXPECT_EQ(static_cast<Int>(domainDescriptor.getRule().getParameters().get("start")), 0);
+    EXPECT_EQ(domainDescriptor.getOrigin().toStdString(), "1970-01-01T00:00:00.0");
+
+    // the device's sample clock runs regardless, so its stream starts at the sample index it stands at
+    auto domain = readFirstDomainValue(valueSignal);
+    ASSERT_TRUE(domain.has_value());
+    const std::int64_t streamStart = peer.lastStreamStart();
+    EXPECT_GE(*domain, start + streamStart);
+    EXPECT_EQ((*domain - start - streamStart) % 100, 0);
+}
+
+// openDAQ servers send their rule start in "interpretation" and only the offset in the data
+TEST_P(DeviceCompatibilityTest, OpenDaqServerLinearStartIsKept)
+{
+    constexpr std::int64_t start = 5003;
+
+    auto options = peerOptions();
+    options.streamData = true;
+    options.linearStart = start;
+    options.startInInterpretation = true;
+
+    FakeLtPeer peer(options);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_TRUE(valueSignal.getDomainSignal().assigned());
+
+    auto domainDescriptor = valueSignal.getDomainSignal().getDescriptor();
+    EXPECT_EQ(static_cast<Int>(domainDescriptor.getRule().getParameters().get("start")), start);
+
+    // the device's sample clock runs regardless, so its stream starts at the sample index it stands at
+    auto domain = readFirstDomainValue(valueSignal);
+    ASSERT_TRUE(domain.has_value());
+    const std::int64_t streamStart = peer.lastStreamStart();
+    EXPECT_GE(*domain, start + streamStart);
+    EXPECT_EQ((*domain - start - streamStart) % 100, 0);
 }
 
 // The value signal publishes without waiting for its time signal's metadata, and is linked to it once it arrives
