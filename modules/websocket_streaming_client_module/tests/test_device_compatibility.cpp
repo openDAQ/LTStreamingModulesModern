@@ -13,9 +13,11 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <future>
@@ -99,6 +101,8 @@ class FakeLtPeer
             std::optional<std::int64_t> linearStart;  // the time signal's "linear.start"
             bool startInInterpretation = false;     // send the start as an openDAQ server does: also in "interpretation", not in the data
             std::string absoluteReference;          // the time signal's "absoluteReference", if not empty
+            bool statusSignal = false;              // also offer a constant-rule status signal on the value's table, as the
+                                                    // FusionLN does; while subscribed it gets an entry after each value packet
         };
 
         explicit FakeLtPeer(Options options)
@@ -279,7 +283,10 @@ class FakeLtPeer
                 { "streamId", "FAKE" },
                 { "commandInterfaces", commandInterfaces },
             });
-            peer->send_metadata(0, "available", {{ "signalIds", { valueSignalId } }});
+            auto available = nlohmann::json::array({ valueSignalId });
+            if (options.statusSignal)
+                available.push_back(statusSignalId);
+            peer->send_metadata(0, "available", {{ "signalIds", available }});
         }
 
         // Answers a request over the transport it came in on; a request whose reply is never called stays unanswered
@@ -455,8 +462,36 @@ class FakeLtPeer
                 ++timeSubscribeRequests;
             }
 
+            else if (rpcMethod == "FAKE.subscribe" && signalId == statusSignalId)
+            {
+                statusSubscribed = true;
+                reply(result(id));
+                peer->send_metadata(timeSigno, "subscribe", {{ "signalId", timeSignalId }});
+                sendTimeMetadata();
+                peer->send_metadata(statusSigno, "subscribe", {{ "signalId", statusSignalId }});
+                peer->send_metadata(statusSigno, "signal", {
+                    { "tableId", tableId },
+                    { "relatedSignals", {
+                        { { "type", options.relationType }, { "signalId", timeSignalId } },
+                    } },
+                    { "definition", {
+                        { "name", statusSignalId },
+                        { "rule", "constant" },
+                        { "dataType", "int64" },
+                    } },
+                });
+            }
+
             else if (rpcMethod == "FAKE.unsubscribe")
             {
+                if (signalId == statusSignalId)
+                {
+                    statusSubscribed = false;
+                    reply(result(id));
+                    peer->send_metadata(statusSigno, "unsubscribe", nlohmann::json::object());
+                    return;
+                }
+
                 if (signalId == valueSignalId)
                 {
                     {
@@ -509,6 +544,7 @@ class FakeLtPeer
                 peer->send_data(timeSigno, boost::asio::buffer(&timeStart, sizeof(timeStart)));
             }
 
+            valueIndex = static_cast<std::uint64_t>(streamStart);
             sendValueData();
         }
 
@@ -521,6 +557,16 @@ class FakeLtPeer
             if (options.explicitTime)
                 peer->send_data(timeSigno, boost::asio::buffer(timeSamples));
             peer->send_data(valueSigno, boost::asio::buffer(valueSamples));
+            valueIndex += valueSamples.size();
+
+            // a constant-rule entry is the value index it holds from, then the value; this one holds from the next value packet
+            if (statusSubscribed)
+            {
+                auto& entry = statusEntries.emplace_back();
+                std::memcpy(entry.data(), &valueIndex, sizeof(valueIndex));
+                std::memcpy(entry.data() + sizeof(valueIndex), &statusValue, sizeof(statusValue));
+                peer->send_data(statusSigno, boost::asio::buffer(entry));
+            }
 
             dataTimer.expires_after(20ms);
             dataTimer.async_wait(
@@ -617,8 +663,10 @@ class FakeLtPeer
         const std::string tableId = "CH1";
         const std::string valueSignalId = "CH1.value";
         const std::string timeSignalId = "CH1.time";
+        const std::string statusSignalId = "CH1.status";
         static constexpr unsigned valueSigno = 1;
         static constexpr unsigned timeSigno = 2;
+        static constexpr unsigned statusSigno = 3;
 
         Options options;
 
@@ -648,6 +696,10 @@ class FakeLtPeer
         }();
 
         bool valueSubscribed = false;  // only touched on the ioc thread
+        bool statusSubscribed = false; // only touched on the ioc thread
+        std::uint64_t valueIndex = 0;  // only touched on the ioc thread
+        const std::int64_t statusValue = 42;
+        std::deque<std::array<std::uint8_t, 16>> statusEntries;  // only touched on the ioc thread; never shrinks
         bool timeMetadataReleased = false;  // only touched on the ioc thread
 
         std::shared_ptr<wss::detail::peer> peer;
@@ -1419,4 +1471,41 @@ TEST_P(DeviceCompatibilityTest, ClosingDoesNotWaitForAnUnansweredRequest)
     }
 
     EXPECT_LT(fastest.count(), 1000);
+}
+
+// A constant-rule entry that holds from the next value packet's first sample must not lend that packet its domain packet
+TEST_P(DeviceCompatibilityTest, ConstantSignalOnTheSameTableLeavesValueDomainPacketsIntact)
+{
+    auto options = peerOptions();
+    options.streamData = true;
+    options.statusSignal = true;
+
+    FakeLtPeer peer(options);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer, 3);
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    auto statusSignal = findSignalByName(signals, "CH1.status");
+    ASSERT_TRUE(valueSignal.assigned());
+    ASSERT_TRUE(statusSignal.assigned());
+
+    auto statusReader = PacketReader(statusSignal);
+    auto valueReader = PacketReader(valueSignal);
+
+    std::size_t valuePackets = 0;
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (valuePackets < 20 && std::chrono::steady_clock::now() < deadline)
+    {
+        for (const auto& packet : valueReader.readAll())
+        {
+            if (packet.getType() != PacketType::Data)
+                continue;
+
+            const auto data = packet.asPtr<IDataPacket>(true);
+            ASSERT_TRUE(data.getDomainPacket().assigned());
+            ASSERT_EQ(data.getDomainPacket().getSampleCount(), data.getSampleCount()) << "value packet " << valuePackets;
+            ++valuePackets;
+        }
+        std::this_thread::sleep_for(20ms);
+    }
+
+    ASSERT_GE(valuePackets, 20u);
 }

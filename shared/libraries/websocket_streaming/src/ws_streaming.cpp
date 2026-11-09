@@ -692,7 +692,9 @@ void WsStreaming::onRemoteSignalDataReceived(
             && (
                 !entry->domainEntry->lastPacket.assigned()
                 || !entry->domainEntry->lastPacket.getOffset().assigned()
-                || entry->domainEntry->lastPacket.getOffset() != domainValue))
+                || entry->domainEntry->lastPacket.getOffset() != domainValue
+                // signals on one table share a domain packet only when it covers their samples exactly
+                || entry->domainEntry->lastPacket.getSampleCount() != sampleCount))
         {
             domainPacket = DataPacket(
                 entry->domainEntry->descriptor,
