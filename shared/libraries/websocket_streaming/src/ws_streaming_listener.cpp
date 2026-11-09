@@ -15,6 +15,7 @@
  */
 
 #include <cstdint>
+#include <cstring>
 #include <utility>
 
 #include <boost/asio/post.hpp>
@@ -131,7 +132,11 @@ void WsStreamingListener::onDataPacketReceived(DataPacketPtr packet)
             });
 
         _lastDescriptor = descriptor;
+        _lastConstantValue.clear();
     }
+
+    if (descriptor.getRule().assigned() && descriptor.getRule().getType() == DataRuleType::Constant)
+        return publishConstantChanges(packet, descriptor);
 
     if (packet.getRawDataSize())
         // Capture the packet by value so its raw buffer stays alive until the handler runs
@@ -145,6 +150,41 @@ void WsStreamingListener::onDataPacketReceived(DataPacketPtr packet)
                     packet.getRawData(),
                     packet.getRawDataSize());
             });
+}
+
+// A constant-rule packet goes out as its changes: its first value if that differs from the last one sent, then each
+// value that differs from the one before it, each at its domain value. LT clients rebuild the samples between them.
+void WsStreamingListener::publishConstantChanges(const DataPacketPtr& packet, const DataDescriptorPtr& descriptor)
+{
+    const auto domainPacket = packet.getDomainPacket();
+    if (!domainPacket.assigned() || !domainPacket.getOffset().assigned() || !domainPacket.getDataDescriptor().assigned())
+        return;
+
+    const auto domainRule = domainPacket.getDataDescriptor().getRule();
+    if (!domainRule.assigned() || domainRule.getType() != DataRuleType::Linear)
+        return;
+
+    const std::int64_t offset = domainPacket.getOffset();
+    const Int delta = domainRule.getParameters().get("delta");
+    const auto sampleSize = descriptor.getSampleSize();
+    const auto *values = static_cast<const std::uint8_t *>(packet.getData());
+
+    for (SizeT i = 0; i < packet.getSampleCount(); ++i)
+    {
+        const auto *value = values + i * sampleSize;
+        if (_lastConstantValue.size() == sampleSize && std::memcmp(_lastConstantValue.data(), value, sampleSize) == 0)
+            continue;
+
+        _lastConstantValue.assign(value, value + sampleSize);
+
+        // wss::local_signal is not thread-safe, so the publish runs on _executor like the other data
+        boost::asio::post(
+            _executor,
+            [localSignal = _localSignal, domainValue = offset + static_cast<std::int64_t>(i) * delta, bytes = _lastConstantValue]()
+            {
+                localSignal->publish_data(domainValue, 1, bytes.data(), bytes.size());
+            });
+    }
 }
 
 void WsStreamingListener::onEventPacketReceived(EventPacketPtr packet)
@@ -168,6 +208,7 @@ void WsStreamingListener::onEventPacketReceived(EventPacketPtr packet)
                 });
 
             _lastDescriptor = newValueDescriptor;
+            _lastConstantValue.clear();
         }
     }
 }

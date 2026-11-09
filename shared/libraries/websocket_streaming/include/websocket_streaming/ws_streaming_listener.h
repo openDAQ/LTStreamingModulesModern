@@ -16,7 +16,9 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 #include <boost/asio/any_io_executor.hpp>
 
@@ -52,6 +54,7 @@ class WsStreamingListener
 
         void onDataPacketReceived(DataPacketPtr packet);
         void onEventPacketReceived(EventPacketPtr packet);
+        void publishConstantChanges(const DataPacketPtr& packet, const DataDescriptorPtr& descriptor);
 
     private:
 
@@ -61,6 +64,7 @@ class WsStreamingListener
         std::shared_ptr<wss::local_signal> _localSignal;
         boost::asio::any_io_executor    _executor;
         bool                            _ruleType;
+        std::vector<std::uint8_t>       _lastConstantValue;     /**< The last constant-rule value sent; empty before the first. */
 };
 
 END_NAMESPACE_OPENDAQ_WEBSOCKET_STREAMING

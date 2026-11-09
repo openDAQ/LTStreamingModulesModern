@@ -1,6 +1,7 @@
 set(TEST_APP test_lt_streaming_tls_integration)
 
 set(TEST_SOURCES test_lt_streaming_tls.cpp
+                 test_lt_streaming_constant.cpp
                  test_app.cpp
 )
 
