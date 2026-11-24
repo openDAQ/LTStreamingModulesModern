@@ -426,8 +426,6 @@ DeviceInfoPtr WebsocketStreamingClientModule::populateDiscoveredDevice(const Mdn
     addAddressInfo(discoveredDevice.ipv6Addresses, "IPv6");
 
     cap.setConnectionType("TCP/IP");
-    cap.setProtocolGroupId(CONST_LT_PROTOCOL_GROUP_ID);
-    cap.setProtocolSecurityLevel(isSecure ? CONST_LTS_STREAMING_SECURITY_LVL : CONST_LT_STREAMING_SECURITY_LVL);
     cap.setPrefix(streamingType.getConnectionStringPrefix());
     cap.setProtocolVersion(discoveredDevice.getPropertyOrDefault("protocolVersion", ""));
     if (discoveredDevice.servicePort > 0)

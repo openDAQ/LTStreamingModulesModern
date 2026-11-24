@@ -337,12 +337,10 @@ TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLtService)
     ASSERT_EQ(cap.getProtocolId(), CONST_LT_STREAMING_ID);
     ASSERT_EQ(cap.getProtocolName(), CONST_LT_STREAMING_ID);
     ASSERT_EQ(cap.getPrefix(), CONST_LT_STREAMING_PREFIX);
-    ASSERT_EQ(cap.getProtocolGroupId(), CONST_LT_PROTOCOL_GROUP_ID);
     ASSERT_EQ(cap.getProtocolType(), ProtocolType::Streaming);
     ASSERT_EQ(cap.getConnectionType(), "TCP/IP");
     ASSERT_EQ(cap.getPort(), 7425);
     ASSERT_EQ(info.getDeviceType().getId(), CONST_LT_STREAMING_ID);
-    ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LT_STREAMING_SECURITY_LVL);
 }
 
 TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLegacyWsService)
@@ -353,12 +351,10 @@ TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLegacyWsServi
     ASSERT_EQ(cap.getProtocolId(), CONST_LT_STREAMING_ID);
     ASSERT_EQ(cap.getProtocolName(), CONST_LT_STREAMING_ID);
     ASSERT_EQ(cap.getPrefix(), CONST_LT_STREAMING_PREFIX);
-    ASSERT_EQ(cap.getProtocolGroupId(), CONST_LT_PROTOCOL_GROUP_ID);
     ASSERT_EQ(cap.getProtocolType(), ProtocolType::Streaming);
     ASSERT_EQ(cap.getConnectionType(), "TCP/IP");
     ASSERT_EQ(cap.getPort(), 7425);
     ASSERT_EQ(info.getDeviceType().getId(), CONST_LT_STREAMING_ID);
-    ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LT_STREAMING_SECURITY_LVL);
 }
 
 TEST_F(WebsocketStreamingClientModuleTest, CompleteServerCapabilityDefaultPortPerScheme)
