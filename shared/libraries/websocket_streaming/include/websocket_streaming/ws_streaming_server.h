@@ -16,14 +16,13 @@
 
 #pragma once
 
-#include <atomic>
-#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/signals2/connection.hpp>
 #include <boost/system/error_code.hpp>
@@ -92,8 +91,9 @@ class WsStreamingServer : public Server
             std::string id;
         };
 
-        std::vector<SignalSnapshot> scanSignals();
-        void createListener(const SignalSnapshot& snapshot);
+        void scan(const ComponentPtr& component);
+        std::vector<SignalSnapshot> scanSignals(const ComponentPtr& component);
+        bool createListener(const SignalSnapshot& snapshot);
 
         void onClientConnected(
             const wss::connection_ptr& connection);
@@ -106,28 +106,7 @@ class WsStreamingServer : public Server
             ComponentPtr& component,
             CoreEventArgsPtr& args);
 
-        void onComponentAdded(
-            ComponentPtr& component,
-            CoreEventArgsPtr& args);
-
-        void onComponentRemoved(
-            ComponentPtr& component,
-            CoreEventArgsPtr& args);
-
-        void onComponentUpdateEnd(
-            ComponentPtr& component,
-            CoreEventArgsPtr& args);
-
-        void onAttributeChanged(
-            ComponentPtr& component,
-            CoreEventArgsPtr& args);
-
-        void onDataDescriptorChanged(
-            ComponentPtr& component,
-            CoreEventArgsPtr& args);
-
-        void rescan();
-        void applySignals(std::uint64_t scan, const std::vector<SignalSnapshot>& snapshots);
+        void applySignals(const std::vector<SignalSnapshot>& snapshots);
 
     private:
 
@@ -149,6 +128,7 @@ class WsStreamingServer : public Server
             // The domain signal's registration at the time this signal was registered; empty if the domain
             // signal was not registered then (e.g. it had no descriptor yet).
             std::weak_ptr<wss::local_signal> domainLocalSignal;
+            std::string domainId;
         };
 
         DevicePtr _rootDevice;
@@ -157,9 +137,10 @@ class WsStreamingServer : public Server
         wss::server _server;
         std::thread _thread;
         std::map<std::string, StreamableSignal> _localSignals;
-        // Scans are numbered on the threads that run them; only the I/O thread uses the last applied number
-        std::atomic<std::uint64_t> _scanCount{0};
-        std::uint64_t _appliedScan{0};
+        // Reads the device tree: core events are reported under its locks, and the I/O thread is joined under them
+        boost::asio::io_context _scanIoc;
+        boost::asio::executor_work_guard<boost::asio::io_context::executor_type> _scanWork{_scanIoc.get_executor()};
+        std::thread _scanThread;
         Int _ws_port{0};
         Int _wss_port{0};
         std::string _path;
