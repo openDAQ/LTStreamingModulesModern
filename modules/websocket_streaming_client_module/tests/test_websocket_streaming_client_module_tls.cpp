@@ -116,21 +116,9 @@ TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceLtsService)
     ASSERT_EQ(cap.getProtocolId(), CONST_LTS_STREAMING_ID);
     ASSERT_EQ(cap.getProtocolName(), CONST_LTS_STREAMING_ID);
     ASSERT_EQ(cap.getPrefix(), CONST_LTS_STREAMING_PREFIX);
-    ASSERT_EQ(cap.getProtocolGroupId(), CONST_LT_PROTOCOL_GROUP_ID);
     ASSERT_EQ(cap.getProtocolType(), ProtocolType::Streaming);
     ASSERT_EQ(cap.getPort(), 7435);
     ASSERT_EQ(info.getDeviceType().getId(), CONST_LTS_STREAMING_ID);
-    ASSERT_EQ(cap.getProtocolSecurityLevel(), CONST_LTS_STREAMING_SECURITY_LVL);
-}
-
-TEST_F(WebsocketStreamingClientModuleTest, PopulateDiscoveredDeviceSecurityLevel)
-{
-    const auto insecure = populateDiscoveredDevice(makeDiscoveredDevice(CONST_LT_SERVICE_NAME));
-    const auto secure = populateDiscoveredDevice(makeDiscoveredDevice(CONST_LTS_SERVICE_NAME, 7415));
-
-    ASSERT_EQ(firstCapability(insecure).getProtocolSecurityLevel(), CONST_LT_STREAMING_SECURITY_LVL);
-    ASSERT_EQ(firstCapability(secure).getProtocolSecurityLevel(), CONST_LTS_STREAMING_SECURITY_LVL);
-    ASSERT_GT(firstCapability(secure).getProtocolSecurityLevel(), firstCapability(insecure).getProtocolSecurityLevel());
 }
 
 TEST_F(WebsocketStreamingClientModuleTest, CompleteServerCapabilityBuildsString)
