@@ -6,7 +6,7 @@ opendaq_dependency(
     NAME                ws-streaming
     REQUIRED_VERSION    3.2.1
     GIT_REPOSITORY      https://github.com/openDAQ/ws-streaming
-    GIT_REF             098eeafca770485c815f845516d9fa686659aee2
+    GIT_REF             6be2f67ee651f07525da179d328422b1701aa67f
     GIT_SHALLOW         OFF
     EXPECT_TARGET       ws-streaming::ws-streaming
 )
