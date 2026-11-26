@@ -38,6 +38,16 @@ class WsStreamingSignal : public MirroredSignal
 
         Bool onTriggerEvent(const EventPacketPtr& eventPacket) override;
 
+        /*!
+         * @brief Links the signal to a domain signal that became available after it was added.
+         *
+         * Raises the core event a local signal raises when its domain signal is set: AttributeChanged
+         * with "AttributeName" set to "DomainSignal". Must not be called while holding a component lock.
+         *
+         * @param domainSignal The mirrored domain signal.
+         */
+        void linkDomainSignal(const MirroredSignalConfigPtr& domainSignal);
+
     protected:
 
         SignalPtr onGetDomainSignal() override;

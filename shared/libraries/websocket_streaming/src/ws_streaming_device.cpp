@@ -169,14 +169,24 @@ void WsStreamingDevice::onDomainSignalChanged(
     wss::remote_signal_ptr signal,
     wss::remote_signal_ptr domainSignal)
 {
-    auto lock = getRecursiveConfigLock2();
-    if (this->objPtr.template asPtr<IRemovable>(true).isRemoved() || !streaming.assigned())
-        return;
+    MirroredSignalPrivatePtr openDaqSignal;
+    MirroredSignalConfigPtr openDaqDomainSignal;
+    {
+        auto lock = getRecursiveConfigLock2();
+        if (this->objPtr.template asPtr<IRemovable>(true).isRemoved() || !streaming.assigned())
+            return;
 
-    auto it = streamingSignals.find(signal->id());
-    auto domainIt = streamingSignals.find(domainSignal->id());
-    if (it != streamingSignals.end() && domainIt != streamingSignals.end())
-        it->second.setMirroredDomainSignal(domainIt->second.asPtr<IMirroredSignalConfig>());
+        auto it = streamingSignals.find(signal->id());
+        auto domainIt = streamingSignals.find(domainSignal->id());
+        if (it == streamingSignals.end() || domainIt == streamingSignals.end())
+            return;
+
+        openDaqSignal = it->second;
+        openDaqDomainSignal = domainIt->second.asPtr<IMirroredSignalConfig>();
+    }
+
+    // raises a core event, so it runs without the device lock
+    static_cast<WsStreamingSignal*>(openDaqSignal.getObject())->linkDomainSignal(openDaqDomainSignal);
 }
 
 void WsStreamingDevice::onSignalUnavailable(wss::remote_signal_ptr signal)

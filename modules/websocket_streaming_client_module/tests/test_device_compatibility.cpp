@@ -45,7 +45,9 @@
 #include <ws-streaming/detail/streaming_protocol.hpp>
 
 #include <testutils/testutils.h>
+#include <websocket_streaming/constants.h>
 #include <websocket_streaming/ws_streaming.h>
+#include <websocket_streaming/ws_streaming_server.h>
 #include <websocket_streaming_client_module/module_dll.h>
 
 #include <opendaq/context_factory.h>
@@ -893,6 +895,177 @@ TEST_P(DeviceCompatibilityTest, DomainMetadataArrivingLateIsStillLinked)
 
     ASSERT_TRUE(domainDescriptor.assigned());
     ASSERT_EQ(domainDescriptor.getName(), "CH1.time");
+}
+
+// Several devices link their time signals at once, late or at publication, while readers come and go and the links are
+// read on another thread. Servers that forward a signal (native, LT) learn of a late link only from the core event a
+// local signal raises: each late link raises one naming its own time signal, a link made at publication raises none,
+// and the linked signals deliver data with a rising domain.
+TEST_P(DeviceCompatibilityTest, DomainLinksHoldUnderStress)
+{
+    constexpr std::size_t deviceCount = 6;
+    constexpr int rounds = 5;
+
+    auto instance = createClientInstance();
+
+    // owned by the handler, which stays subscribed until the instance is gone
+    struct Links
+    {
+        std::mutex mutex;
+        std::map<std::string, std::vector<std::string>> domainIds;  // value signal global ID -> domain IDs of its events
+    };
+    auto links = std::make_shared<Links>();
+    instance.getContext().getOnCoreEvent() += [links](const ComponentPtr& component, const CoreEventArgsPtr& args)
+    {
+        if (args.getEventId() != static_cast<Int>(CoreEventId::AttributeChanged))
+            return;
+        if (!(args.getParameters().get("AttributeName") == "DomainSignal"))
+            return;
+
+        const SignalPtr domainSignal = args.getParameters().get("DomainSignal");
+        std::scoped_lock lock(links->mutex);
+        links->domainIds[component.getGlobalId().toStdString()].push_back(
+            domainSignal.assigned() ? domainSignal.getGlobalId().toStdString() : "");
+    };
+    const auto eventsOf = [&links](const SignalPtr& signal)
+    {
+        std::scoped_lock lock(links->mutex);
+        return links->domainIds[signal.getGlobalId().toStdString()];
+    };
+
+    for (int round = 0; round < rounds; ++round)
+    {
+        SCOPED_TRACE("round " + std::to_string(round));
+
+        // even devices send their time signal's metadata only when released, odd ones before the value signal's
+        std::vector<std::unique_ptr<FakeLtPeer>> peers;
+        std::vector<DevicePtr> devices;
+        std::vector<SignalPtr> values;
+        for (std::size_t i = 0; i < deviceCount; ++i)
+        {
+            auto options = peerOptions();
+            options.streamData = true;
+            options.timeMetadataBeforeValue = i % 2 == 1;
+            options.withholdTimeMetadata = i % 2 == 0;
+
+            peers.push_back(std::make_unique<FakeLtPeer>(options));
+            devices.push_back(connectDevice(instance, peers.back()->port()));
+            values.push_back(waitForSignal(devices.back(), "CH1.value"));
+            ASSERT_TRUE(values.back().assigned());
+        }
+
+        std::atomic<bool> stop{false};
+        std::atomic<unsigned> churnErrors{0};
+        std::thread churn([&]
+        {
+            while (!stop)
+            {
+                for (const auto& value : values)
+                {
+                    try
+                    {
+                        auto reader = buildStreamReader(value);
+                        value.getDomainSignal();
+                    }
+                    catch (...)
+                    {
+                        ++churnErrors;
+                    }
+                }
+
+                // a pace a device can answer over HTTP, one connection per request
+                std::this_thread::sleep_for(5ms);
+            }
+        });
+
+        // joined on every exit, a failed assertion included
+        struct Joiner
+        {
+            std::atomic<bool>& stop;
+            std::thread& thread;
+            ~Joiner()
+            {
+                stop = true;
+                if (thread.joinable())
+                    thread.join();
+            }
+        } joiner{stop, churn};
+
+        for (std::size_t i = 0; i < deviceCount; i += 2)
+            peers[i]->releaseTimeMetadata();
+
+        ASSERT_TRUE(waitUntil([&]
+        {
+            return std::all_of(values.begin(), values.end(), [](const SignalPtr& value) { return value.getDomainSignal().assigned(); });
+        }));
+        for (std::size_t i = 0; i < deviceCount; i += 2)
+            ASSERT_TRUE(waitUntil([&] { return !eventsOf(values[i]).empty(); }));
+
+        stop = true;
+        churn.join();
+        EXPECT_EQ(churnErrors, 0u);
+
+        for (std::size_t i = 0; i < deviceCount; ++i)
+        {
+            SCOPED_TRACE("device " + std::to_string(i));
+
+            const auto timeSignal = findSignalByName(devices[i].getSignals(search::Recursive(search::Any())), "CH1.time");
+            ASSERT_TRUE(timeSignal.assigned());
+            EXPECT_EQ(values[i].getDomainSignal(), timeSignal);
+
+            if (i % 2 == 0)
+                EXPECT_EQ(eventsOf(values[i]), std::vector<std::string>{timeSignal.getGlobalId().toStdString()});
+            else
+                EXPECT_TRUE(eventsOf(values[i]).empty());
+
+            auto reader = buildStreamReader(values[i]);
+            const auto domain = readDomain(reader, 200, 3s);
+            ASSERT_GT(domain.size(), 0u);
+            EXPECT_EQ(std::adjacent_find(domain.begin(), domain.end(), std::greater_equal<>()), domain.end());
+        }
+
+        for (const auto& device : devices)
+            instance.removeDevice(device);
+    }
+}
+
+// An LT server forwarding the device announces the value signal again once it is linked late, so its clients link it too
+TEST_P(DeviceCompatibilityTest, LateDomainLinkReachesClientsOfAForwardingServer)
+{
+    auto options = peerOptions();
+    options.timeMetadataBeforeValue = false;
+    options.withholdTimeMetadata = true;
+
+    FakeLtPeer peer(options);
+    auto gateway = connectAndWaitForSignals(peer, 1);
+
+    const std::uint16_t port = GetParam() == CommandTransport::InBand ? 7690 : 7691;
+    auto config = PropertyObject();
+    config.addProperty(BoolProperty(websocket_streaming::PROPERTY_ENABLE_WS_STREAMING_PORT_SERVER, True));
+    config.addProperty(BoolProperty(websocket_streaming::PROPERTY_ENABLE_WS_CONTROL_PORT_SERVER, False));
+    config.addProperty(IntProperty(websocket_streaming::PROPERTY_WS_STREAMING_PORT_SERVER, port));
+    auto server = createWithImplementation<IServer, websocket_streaming::WsStreamingServer>(
+        gateway.instance.getRootDevice(), config, gateway.instance.getContext());
+
+    auto client = createClientInstance();
+    auto forwarded = connectDevice(client, port);
+    const auto forwardedValue = [&forwarded]
+    {
+        return findSignalByName(forwarded.getSignals(search::Recursive(search::Any())), "CH1.value");
+    };
+    ASSERT_TRUE(waitUntil([&] { return forwardedValue().assigned(); }));
+    ASSERT_FALSE(forwardedValue().getDomainSignal().assigned());
+
+    peer.releaseTimeMetadata();
+
+    ASSERT_TRUE(waitUntil([&]
+    {
+        const auto value = forwardedValue();
+        return value.assigned() && value.getDomainSignal().assigned();
+    }));
+    ASSERT_EQ(forwardedValue().getDomainSignal().getDescriptor().getName(), "CH1.time");
+
+    server.stop();
 }
 
 // The value signal publishes before the device mentions its time signal; its next metadata finds the time signal
