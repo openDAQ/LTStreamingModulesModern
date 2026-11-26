@@ -504,7 +504,7 @@ void WsStreaming::onRemoteSignalSubscribed(std::weak_ptr<WsStreamingRemoteSignal
 
     LOG_I("Signal subscribed: {}", entry->ptr->id());
 
-    // only an ack answering openDAQ's latest request reaches openDAQ, not those of fetches or replaced requests
+    // acks of the fetch do not reach openDAQ; after back-to-back requests, an earlier request's ack can answer the latest
     if (entry->isSubscribed && entry->ackPending)
     {
         entry->ackPending = false;
@@ -681,8 +681,8 @@ void WsStreaming::onRemoteSignalDataReceived(
     if (!entry)
         return;
 
-    // readers get only the data of openDAQ's acknowledged subscribe: the fetch's data, or data from before a resubscribe
-    // took effect, would reach them as a domain gap; domain signals, which openDAQ does not subscribe, feed their dependents
+    // readers get data once an ack follows openDAQ's latest subscribe, so the fetch's stream causes no gap; after back-to-back
+    // requests that ack can be an earlier one's, which shows as one gap; domain signals, never subscribed by openDAQ, always pass
     if (!entry->descriptor.assigned() || (!entry->isDomain && (!entry->isSubscribed || entry->ackPending)))
         return;
 
