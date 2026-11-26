@@ -113,6 +113,8 @@ void WsStreamingDevice::removed()
 
 void WsStreamingDevice::removedNoLock()
 {
+    // the I/O thread's callbacks hold temporary references; ended first, the last release cannot fall on it
+    reinterpret_cast<WsStreaming*>(streaming.getObject())->disconnect();
     streaming.release();
     auto lock = getRecursiveConfigLock2();
     Device::removed();

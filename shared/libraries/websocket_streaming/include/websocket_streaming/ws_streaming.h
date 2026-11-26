@@ -137,6 +137,15 @@ class WsStreaming : public Streaming
         void connect();
 
         /*!
+         * @brief Closes the connection and waits until the I/O context's thread has ended.
+         *
+         * Called by the owning device before it releases the streaming. Does nothing if the
+         * streaming is not connected or is already disconnected. Must not be called from a
+         * streaming callback.
+         */
+        void disconnect();
+
+        /*!
          * @brief An event raised when a signal becomes available.
          *
          * This event is only raised after an initial subscribe has acquired the metadata for a

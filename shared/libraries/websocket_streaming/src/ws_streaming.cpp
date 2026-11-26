@@ -232,7 +232,7 @@ void WsStreaming::connect()
     }
 }
 
-WsStreaming::~WsStreaming()
+void WsStreaming::disconnect()
 {
     // connect() was not called, or it failed and has already stopped the thread
     if (!thread.joinable())
@@ -264,6 +264,11 @@ WsStreaming::~WsStreaming()
     });
 
     thread.join();
+}
+
+WsStreaming::~WsStreaming()
+{
+    disconnect();
 }
 
 PropertyObjectPtr WsStreaming::populateConfigFromDefault(const PropertyObjectPtr& config, bool secure)
