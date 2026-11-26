@@ -933,10 +933,9 @@ TEST_P(DeviceCompatibilityTest, DomainLinksHoldUnderStress)
         return links->domainIds[signal.getGlobalId().toStdString()];
     };
 
+    // no SCOPED_TRACE: its per-thread storage is allocated on first use, and the Windows debug leak check counts it
     for (int round = 0; round < rounds; ++round)
     {
-        SCOPED_TRACE("round " + std::to_string(round));
-
         // even devices send their time signal's metadata only when released, odd ones before the value signal's
         std::vector<std::unique_ptr<FakeLtPeer>> peers;
         std::vector<DevicePtr> devices;
@@ -951,7 +950,7 @@ TEST_P(DeviceCompatibilityTest, DomainLinksHoldUnderStress)
             peers.push_back(std::make_unique<FakeLtPeer>(options));
             devices.push_back(connectDevice(instance, peers.back()->port()));
             values.push_back(waitForSignal(devices.back(), "CH1.value"));
-            ASSERT_TRUE(values.back().assigned());
+            ASSERT_TRUE(values.back().assigned()) << "round " << round << ", device " << i;
         }
 
         std::atomic<bool> stop{false};
@@ -997,31 +996,31 @@ TEST_P(DeviceCompatibilityTest, DomainLinksHoldUnderStress)
         ASSERT_TRUE(waitUntil([&]
         {
             return std::all_of(values.begin(), values.end(), [](const SignalPtr& value) { return value.getDomainSignal().assigned(); });
-        }));
+        })) << "round " << round;
         for (std::size_t i = 0; i < deviceCount; i += 2)
-            ASSERT_TRUE(waitUntil([&] { return !eventsOf(values[i]).empty(); }));
+            ASSERT_TRUE(waitUntil([&] { return !eventsOf(values[i]).empty(); })) << "round " << round << ", device " << i;
 
         stop = true;
         churn.join();
-        EXPECT_EQ(churnErrors, 0u);
+        EXPECT_EQ(churnErrors, 0u) << "round " << round;
 
         for (std::size_t i = 0; i < deviceCount; ++i)
         {
-            SCOPED_TRACE("device " + std::to_string(i));
-
             const auto timeSignal = findSignalByName(devices[i].getSignals(search::Recursive(search::Any())), "CH1.time");
-            ASSERT_TRUE(timeSignal.assigned());
-            EXPECT_EQ(values[i].getDomainSignal(), timeSignal);
+            ASSERT_TRUE(timeSignal.assigned()) << "round " << round << ", device " << i;
+            EXPECT_EQ(values[i].getDomainSignal(), timeSignal) << "round " << round << ", device " << i;
 
             if (i % 2 == 0)
-                EXPECT_EQ(eventsOf(values[i]), std::vector<std::string>{timeSignal.getGlobalId().toStdString()});
+                EXPECT_EQ(eventsOf(values[i]), std::vector<std::string>{timeSignal.getGlobalId().toStdString()})
+                    << "round " << round << ", device " << i;
             else
-                EXPECT_TRUE(eventsOf(values[i]).empty());
+                EXPECT_TRUE(eventsOf(values[i]).empty()) << "round " << round << ", device " << i;
 
             auto reader = buildStreamReader(values[i]);
             const auto domain = readDomain(reader, 200, 3s);
-            ASSERT_GT(domain.size(), 0u);
-            EXPECT_EQ(std::adjacent_find(domain.begin(), domain.end(), std::greater_equal<>()), domain.end());
+            ASSERT_GT(domain.size(), 0u) << "round " << round << ", device " << i;
+            EXPECT_EQ(std::adjacent_find(domain.begin(), domain.end(), std::greater_equal<>()), domain.end())
+                << "round " << round << ", device " << i;
         }
 
         for (const auto& device : devices)
