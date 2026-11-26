@@ -99,6 +99,8 @@ class FakeLtPeer
             std::optional<std::int64_t> linearStart;  // the time signal's "linear.start"
             bool startInInterpretation = false;     // send the start as an openDAQ server does: also in "interpretation", not in the data
             std::string absoluteReference;          // the time signal's "absoluteReference", if not empty
+            std::chrono::milliseconds unsubscribeTakesEffectAfter{0};  // as the T100: answer an unsubscribe at once, run it
+                                                                       // this much later, and drop a subscribe until then
         };
 
         explicit FakeLtPeer(Options options)
@@ -109,6 +111,7 @@ class FakeLtPeer
                 boost::asio::ip::make_address("127.0.0.1"), 0))
             , dataTimer(ioc)
             , requestTimer(ioc)
+            , unsubscribeTimer(ioc)
         {
             acceptor.async_accept(
                 [this](const boost::system::error_code& ec, boost::asio::ip::tcp::socket socket)
@@ -409,6 +412,10 @@ class FakeLtPeer
                         return;  // simulate a dropped request: no response, no effect
                 }
 
+                // answered, but dropped: the unsubscribe before it has not run yet
+                if (unsubscribing)
+                    return reply(result(id));
+
                 valueSubscribed = true;
                 streamStart = sampleIndexNow();
                 {
@@ -437,9 +444,27 @@ class FakeLtPeer
                         ++valueUnsubscribeRequests;
                     }
 
-                    valueSubscribed = false;
+                    if (options.unsubscribeTakesEffectAfter.count() == 0)
+                    {
+                        valueSubscribed = false;
+                        reply(result(id));
+                        peer->send_metadata(valueSigno, "unsubscribe", nlohmann::json::object());
+                        return;
+                    }
+
                     reply(result(id));
-                    peer->send_metadata(valueSigno, "unsubscribe", nlohmann::json::object());
+                    unsubscribing = true;
+                    unsubscribeTimer.expires_after(options.unsubscribeTakesEffectAfter);
+                    unsubscribeTimer.async_wait(
+                        [this](const boost::system::error_code& ec)
+                        {
+                            if (ec)
+                                return;
+                            unsubscribing = false;
+                            valueSubscribed = false;
+                            if (peer)
+                                peer->send_metadata(valueSigno, "unsubscribe", nlohmann::json::object());
+                        });
                     return;
                 }
 
@@ -591,6 +616,7 @@ class FakeLtPeer
         boost::asio::ip::tcp::acceptor httpAcceptor;
         boost::asio::steady_timer dataTimer;
         boost::asio::steady_timer requestTimer;
+        boost::asio::steady_timer unsubscribeTimer;
         std::thread thread;
 
         // only touched on the ioc thread; an HTTP request's reply holds its connection open
@@ -610,6 +636,7 @@ class FakeLtPeer
         }();
 
         bool valueSubscribed = false;  // only touched on the ioc thread
+        bool unsubscribing = false;    // an answered unsubscribe has not run yet; only touched on the ioc thread
         bool timeMetadataReleased = false;  // only touched on the ioc thread
 
         std::shared_ptr<wss::detail::peer> peer;
@@ -1196,6 +1223,46 @@ TEST_P(DeviceCompatibilityTest, UnsubscribeFromTheIoThreadAndSubscribeElsewhereR
     for (const auto deadline = std::chrono::steady_clock::now() + 10s; samples == 0 && std::chrono::steady_clock::now() < deadline;)
         samples = readDomain(secondReader, 1, 100ms).size();
     EXPECT_EQ(samples, 1u) << "no data for the second reader";
+}
+
+// A device that answers an unsubscribe before it runs it drops a subscribe that arrives until then (T100), so the client
+// holds the subscribe until the device reports the signal unsubscribed
+TEST_P(DeviceCompatibilityTest, SubscribeRightAfterAnUnsubscribeGetsData)
+{
+    auto options = peerOptions();
+    options.streamData = true;
+    options.unsubscribeTakesEffectAfter = 40ms;
+
+    FakeLtPeer peer(options);
+    auto [instance, device, signals] = connectAndWaitForSignals(peer);
+    auto valueSignal = findSignalByName(signals, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+
+    auto reader = buildStreamReader(valueSignal);
+    ASSERT_EQ(readDomain(reader, 1, 10s).size(), 1u) << "the first subscribe got no data";
+
+    // the next reader subscribes while the device still runs the unsubscribe of the released one
+    reader.release();
+    reader = buildStreamReader(valueSignal);
+    EXPECT_EQ(readDomain(reader, 1, 3s).size(), 1u) << "the subscribe sent during the unsubscribe was dropped";
+}
+
+// The metadata fetch's subscription is released at publication, so the same holds for a subscribe made the moment the
+// signal appears
+TEST_P(DeviceCompatibilityTest, SubscribeAtPublicationWaitsForTheFetchRelease)
+{
+    auto options = peerOptions();
+    options.streamData = true;
+    options.unsubscribeTakesEffectAfter = 40ms;
+
+    FakeLtPeer peer(options);
+    auto instance = createClientInstance();
+    auto device = connectDevice(instance, peer.port());
+    auto valueSignal = waitForSignal(device, "CH1.value");
+    ASSERT_TRUE(valueSignal.assigned());
+
+    auto reader = buildStreamReader(valueSignal);
+    EXPECT_EQ(readDomain(reader, 1, 3s).size(), 1u) << "the subscribe sent during the fetch release was dropped";
 }
 
 // The old stream flows until the device has run the unsubscribe, and the resubscribe starts a new one where the

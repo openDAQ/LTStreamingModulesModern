@@ -19,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/asio/error.hpp>
@@ -404,7 +405,13 @@ void WsStreaming::subscribeRemoteSignal(const std::string& signalId)
         }
 
         LOG_I("Found signal, subscribing");
-        signalIt->second->ptr->subscribe();
+
+        // A device can answer an unsubscribe before it has run it, and drops a subscribe that reaches it until then. While
+        // the device reports the signal subscribed, the subscribe waits for the unsubscribe ack. A domain signal does not
+        // wait: the device keeps it subscribed for its value signals, so no ack is on its way.
+        signalIt->second->subscribeHeld = !signalIt->second->isDomain && signalIt->second->ptr->is_subscribed();
+        if (!signalIt->second->subscribeHeld)
+            signalIt->second->ptr->subscribe();
         signalIt->second->isSubscribed = true;
         signalIt->second->ackPending = true;
     }
@@ -429,6 +436,10 @@ void WsStreaming::unsubscribeRemoteSignal(const std::string& signalId)
         }
 
         LOG_I("Found signal, unsubscribing");
+
+        // a held subscribe goes out first: the device gets every request, so an unsubscribe it never acks holds back one subscribe only
+        if (std::exchange(signalIt->second->subscribeHeld, false))
+            signalIt->second->ptr->subscribe();
         signalIt->second->ptr->unsubscribe();
         signalIt->second->isSubscribed = false;
         signalIt->second->ackPending = true;
@@ -740,6 +751,10 @@ void WsStreaming::onRemoteSignalUnsubscribed(std::weak_ptr<WsStreamingRemoteSign
         return;
 
     LOG_I("Signal unsubscribed: {}", entry->ptr->id());
+
+    // the device has run the unsubscribe that a held subscribe waited for
+    if (std::exchange(entry->subscribeHeld, false))
+        entry->ptr->subscribe();
 
     if (!entry->isSubscribed && entry->ackPending)
     {
