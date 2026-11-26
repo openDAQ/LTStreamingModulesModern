@@ -352,11 +352,13 @@ ListPtr<IPropertyObject> WsStreamingServer::getDiscoveryConfigs()
 
 void WsStreamingServer::onStopServer()
 {
+    // First, as it cannot fail: the destructor joins the scan thread even if the rest of this throws
+    _scanIoc.stop();
+
     _onClientConnected.disconnect();
     _onClientDisconnected.disconnect();
 
     context.getOnCoreEvent() -= event(&WsStreamingServer::onCoreEvent);
-    _scanIoc.stop();
 
     // openDAQ can (but probably should not) call onStopServer() more than once.
     if (_thread.joinable())
