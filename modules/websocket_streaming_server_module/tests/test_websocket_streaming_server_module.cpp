@@ -2,18 +2,26 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
+#include <functional>
 #include <future>
+#include <iostream>
 #include <map>
 #include <mutex>
 #include <set>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
 
+#include <opendaq/core_opendaq_event_args_factory.h>
 #include <opendaq/data_descriptor_factory.h>
 #include <opendaq/device_impl.h>
 #include <opendaq/device_info_factory.h>
+#include <opendaq/folder_factory.h>
+#include <opendaq/signal_factory.h>
 #include <opendaq/signal_impl.h>
 
 #include <ws-streaming/client.hpp>
@@ -26,46 +34,8 @@ using namespace std::chrono_literals;
 namespace
 {
 
-    // A signal that, once armed, holds the next getDescriptor() call until released: it stops a scan of the tree
-    // midway, without holding any lock.
-    class GateSignal : public SignalImpl
-    {
-    public:
-        GateSignal(const ContextPtr& context,
-                   const DataDescriptorPtr& descriptor,
-                   const ComponentPtr& parent,
-                   const StringPtr& localId)
-            : SignalImpl(context, descriptor, parent, localId)
-        {
-        }
-
-        std::future<void> arm(std::future<void> releasedFuture)
-        {
-            released = std::move(releasedFuture);
-            entered = std::promise<void>{};
-            auto enteredFuture = entered.get_future();
-            armed = true;
-            return enteredFuture;
-        }
-
-        ErrCode INTERFACE_FUNC getDescriptor(IDataDescriptor** descriptor) override
-        {
-            if (armed.exchange(false))
-            {
-                entered.set_value();
-                released.wait();
-            }
-
-            return SignalImpl::getDescriptor(descriptor);
-        }
-
-    private:
-        std::atomic<bool> armed{false};
-        std::promise<void> entered;
-        std::future<void> released;
-    };
-
-    // A signal that fails on request: when its descriptor is read on a given thread, or when a listener connects.
+    // A signal that fails on request: when its descriptor is read on a given thread (with an error, or as missing), or
+    // when a listener connects.
     class FaultySignal : public SignalImpl
     {
     public:
@@ -79,10 +49,15 @@ namespace
 
         ErrCode INTERFACE_FUNC getDescriptor(IDataDescriptor** descriptor) override
         {
+            OPENDAQ_PARAM_NOT_NULL(descriptor);
             if (std::this_thread::get_id() == descriptorFailsOn)
             {
                 ++failures;
-                return DAQ_MAKE_ERROR_INFO(OPENDAQ_ERR_GENERALERROR, "The descriptor cannot be read");
+                if (!descriptorMissing)
+                    return DAQ_MAKE_ERROR_INFO(OPENDAQ_ERR_GENERALERROR, "The descriptor cannot be read");
+
+                *descriptor = nullptr;
+                return OPENDAQ_SUCCESS;
             }
 
             return SignalImpl::getDescriptor(descriptor);
@@ -100,8 +75,28 @@ namespace
         }
 
         std::atomic<std::thread::id> descriptorFailsOn{};
+        std::atomic<bool> descriptorMissing{false};
         std::atomic<bool> listenerConnectedFails{false};
         std::atomic<int> failures{0};
+    };
+
+    // A signal that calls back the first time its descriptor is read: it lets a test change the tree in the middle of a scan.
+    class HookSignal : public SignalImpl
+    {
+    public:
+        using SignalImpl::SignalImpl;
+
+        ErrCode INTERFACE_FUNC getDescriptor(IDataDescriptor** descriptor) override
+        {
+            if (onFirstRead && !read.exchange(true))
+                onFirstRead();
+            return SignalImpl::getDescriptor(descriptor);
+        }
+
+        std::function<void()> onFirstRead;
+
+    private:
+        std::atomic<bool> read{false};
     };
 
     // A root device whose signals the test adds from its own thread.
@@ -125,20 +120,57 @@ namespace
             return createAndAddSignal(localId, descriptor);
         }
 
-        SignalConfigPtr addGateSignal(const std::string& localId)
+        // A folder of the device that takes any component
+        FolderConfigPtr addTestFolder(const std::string& localId)
         {
-            SignalConfigPtr signal = createWithImplementation<ISignalConfig, GateSignal>(
+            return this->addFolder(localId);
+        }
+
+        SignalConfigPtr addSignalTo(const FolderConfigPtr& folder, const std::string& localId)
+        {
+            const auto descriptor = DataDescriptorBuilder().setSampleType(SampleType::Float64).build();
+            const auto signal = SignalWithDescriptor(context, descriptor, folder, localId);
+            folder.addItem(signal);
+            return signal;
+        }
+
+        // Reports a core event the way a component does
+        void reportCoreEvent(const ComponentPtr& component, const CoreEventArgsPtr& eventArgs)
+        {
+            EventPtr<ComponentPtr, CoreEventArgsPtr> event;
+            checkErrorInfo(context->getOnCoreEvent(&event));
+
+            ComponentPtr sender = component;
+            CoreEventArgsPtr args = eventArgs;
+            event.trigger(sender, args);
+        }
+
+        SignalConfigPtr addHookSignal(const std::string& localId, std::function<void()> onFirstRead)
+        {
+            SignalConfigPtr signal = createWithImplementation<ISignalConfig, HookSignal>(
                 context, DataDescriptorBuilder().setSampleType(SampleType::Float64).build(), signals, localId);
+            static_cast<HookSignal&>(*signal.getObject()).onFirstRead = std::move(onFirstRead);
             Device::addSignal(signal);
             return signal;
         }
 
-        SignalConfigPtr addFaultySignal(const std::string& localId, std::thread::id descriptorFailsOn = {})
+        SignalConfigPtr addFaultySignal(const std::string& localId, std::thread::id descriptorFailsOn = {}, bool descriptorMissing = false)
+        {
+            return addFaultySignalTo(signals, localId, descriptorFailsOn, descriptorMissing);
+        }
+
+        // Set up before it is added, as a scan may read it at once
+        SignalConfigPtr addFaultySignalTo(const FolderConfigPtr& folder,
+                                          const std::string& localId,
+                                          std::thread::id descriptorFailsOn = {},
+                                          bool descriptorMissing = false)
         {
             SignalConfigPtr signal = createWithImplementation<ISignalConfig, FaultySignal>(
-                context, DataDescriptorBuilder().setSampleType(SampleType::Float64).build(), signals, localId);
-            static_cast<FaultySignal&>(*signal.getObject()).descriptorFailsOn = descriptorFailsOn;
-            Device::addSignal(signal);
+                context, DataDescriptorBuilder().setSampleType(SampleType::Float64).build(), folder, localId);
+            auto& faulty = static_cast<FaultySignal&>(*signal.getObject());
+            faulty.descriptorFailsOn = descriptorFailsOn;
+            faulty.descriptorMissing = descriptorMissing;
+            folder.addItem(signal);
             return signal;
         }
 
@@ -149,7 +181,34 @@ namespace
         }
     };
 
-    // Connects to the LT server and records the ids of the signals it announces.
+    // Ends the process when a test deadlocks, as its threads can then not be joined.
+    class Watchdog
+    {
+    public:
+        explicit Watchdog(const char* what)
+            : thread([this, what]
+              {
+                  if (finished.get_future().wait_for(20s) == std::future_status::ready)
+                      return;
+
+                  std::cerr << "[ DEADLOCK ] " << what << std::endl;
+                  std::_Exit(3);
+              })
+        {
+        }
+
+        ~Watchdog()
+        {
+            finished.set_value();
+            thread.join();
+        }
+
+    private:
+        std::promise<void> finished;
+        std::thread thread;
+    };
+
+    // Connects to the LT server and records the ids of the signals it announces and withdraws.
     class AvailableSignalsClient
     {
     public:
@@ -177,6 +236,13 @@ namespace
                                              ++announcements[signal->id()];
                                              changed.notify_all();
                                          });
+                                     onUnavailable = c->on_unavailable.connect(
+                                         [this](wss::remote_signal_ptr signal)
+                                         {
+                                             std::scoped_lock lock(this->mutex);
+                                             ++withdrawals[signal->id()];
+                                             changed.notify_all();
+                                         });
                                  });
             thread = std::thread{[this] { ioc.run(); }};
         }
@@ -187,6 +253,7 @@ namespace
                               [this]
                               {
                                   onAvailable.disconnect();
+                                  onUnavailable.disconnect();
                                   if (connection)
                                       connection->close();
                                   ioc.stop();
@@ -213,6 +280,19 @@ namespace
             return it != announcements.end() ? it->second : 0;
         }
 
+        bool waitWithdrawn(const std::string& id)
+        {
+            std::unique_lock lock(mutex);
+            return changed.wait_for(lock, 5s, [&] { return withdrawals.count(id) > 0; });
+        }
+
+        std::size_t withdrawalCount(const std::string& id)
+        {
+            std::scoped_lock lock(mutex);
+            const auto it = withdrawals.find(id);
+            return it != withdrawals.end() ? it->second : 0;
+        }
+
         // Subscribes to an announced signal; true once the server confirms, which it does after its own handling
         bool subscribe(const std::string& id)
         {
@@ -232,9 +312,11 @@ namespace
         wss::client client{ioc.get_executor()};
         wss::connection_ptr connection;
         boost::signals2::scoped_connection onAvailable;
+        boost::signals2::scoped_connection onUnavailable;
         std::mutex mutex;
         std::condition_variable changed;
         std::map<std::string, std::size_t> announcements;
+        std::map<std::string, std::size_t> withdrawals;
         std::set<std::string> subscribed;
         // used on the client thread only
         std::map<std::string, wss::remote_signal_ptr> remoteSignals;
@@ -598,14 +680,34 @@ TEST_F(WsStreamingServerModuleTest, ProviderOptionsIgnoreUnknownKeys)
     ASSERT_EQ(config.getPropertyValue(PROPERTY_WS_STREAMING_PORT_SERVER), 7661);
 }
 
-// The ws-streaming server is not thread-safe: a signal added on another thread is registered on its I/O thread
-TEST_F(WsStreamingServerModuleTest, SignalAddedOnAnotherThreadIsAnnouncedFromTheServerThread)
+// A server on a device whose tree the test changes, which reports core events as an instance does
+class WsStreamingServerTreeTest : public WsStreamingServerModuleTest
 {
-    const auto context = NullContext();
-    const auto module = CreateModule(context);
-    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
-    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
-    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+protected:
+    WsStreamingServerTreeTest()
+    {
+        device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+    }
+
+    // The I/O thread of the ws-streaming server, read from a handler it runs
+    static std::thread::id ioThreadOf(const ServerPtr& server)
+    {
+        std::promise<std::thread::id> ioThread;
+        auto id = ioThread.get_future();
+        boost::asio::post(static_cast<WsStreamingServer&>(*server.getObject()).getWsServer().executor(),
+                          [ioThread = std::move(ioThread)]() mutable { ioThread.set_value(std::this_thread::get_id()); });
+        return id.get();
+    }
+
+    ContextPtr context = NullContext();
+    ModulePtr module = CreateModule(context);
+    DevicePtr device = createWithImplementation<IDevice, SignalAddingDevice>(context);
+    SignalAddingDevice& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
+};
+
+// The ws-streaming server is not thread-safe: a signal added on another thread is registered on its I/O thread
+TEST_F(WsStreamingServerTreeTest, SignalAddedOnAnotherThreadIsAnnouncedFromTheServerThread)
+{
     const auto initialId = deviceImpl.addTestSignal("initial");
 
     auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7662), context);
@@ -642,150 +744,39 @@ TEST_F(WsStreamingServerModuleTest, SignalAddedOnAnotherThreadIsAnnouncedFromThe
     server.stop();
 }
 
-// The scan no longer builds metadata: a domain signal without a descriptor is skipped instead of throwing
-TEST_F(WsStreamingServerModuleTest, DomainSignalWithoutDescriptorDoesNotHideItsValueSignal)
+// The I/O thread reads the descriptor again when it registers a signal: one that is gone by then is not announced
+TEST_F(WsStreamingServerTreeTest, SignalWithoutADescriptorAtRegistrationIsNotAnnounced)
 {
-    const auto context = NullContext();
-    const auto module = CreateModule(context);
-    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
-    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
-    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
-
-    const auto domain = deviceImpl.addSignal("domain", nullptr);
-    const auto value = deviceImpl.addSignal("value", DataDescriptorBuilder().setSampleType(SampleType::Float64).build());
-    value.setDomainSignal(domain);
-
-    ServerPtr server;
-    ASSERT_NO_THROW(
-        server = (createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7663), context)));
-
-    AvailableSignalsClient client{"ws://127.0.0.1:7663/"};
-    EXPECT_TRUE(client.waitAvailable(value.getGlobalId().toStdString()));
-    // a domain signal is registered, and so announced, before the signals that use it
-    EXPECT_FALSE(client.isAvailable(domain.getGlobalId().toStdString()));
-
-    server.stop();
-}
-
-// The I/O thread reads the descriptor when it registers a signal: one cleared after the scan is not announced
-TEST_F(WsStreamingServerModuleTest, SignalWhoseDescriptorIsClearedBeforeRegistrationIsNotAnnounced)
-{
-    const auto context = NullContext();
-    const auto module = CreateModule(context);
-    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
-    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
-    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
-
     auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7664), context);
-    auto& wsServer = static_cast<WsStreamingServer&>(*server.getObject()).getWsServer();
     AvailableSignalsClient client{"ws://127.0.0.1:7664/"};
 
-    std::promise<void> entered;
-    std::promise<void> release;
-    boost::asio::post(wsServer.executor(),
-        [&entered, released = release.get_future()]
-        {
-            entered.set_value();
-            released.wait();
-        });
-    entered.get_future().wait();
+    // the scan sees the descriptor, the I/O thread does not, as if it was cleared between the two
+    const auto missing = deviceImpl.addFaultySignal("missing", ioThreadOf(server), true);
 
-    // the scan sees the descriptor; it is gone by the time the I/O thread registers the signal
-    const auto cleared = deviceImpl.addSignal("cleared", DataDescriptorBuilder().setSampleType(SampleType::Float64).build());
-    cleared.setDescriptor(nullptr);
-    release.set_value();
-
-    // signals are registered in order, so the cleared one would be announced before the marker
+    // signals are registered in order, so the missing one would be announced before the marker
     const auto markerId = deviceImpl.addTestSignal("marker");
     EXPECT_TRUE(client.waitAvailable(markerId));
-    EXPECT_FALSE(client.isAvailable(cleared.getGlobalId().toStdString()));
-
-    server.stop();
-}
-
-// Scans from different threads can reach the I/O thread out of order: an older one must not undo a newer one.
-// One thread's scan reads the value signal's old domain and is held at the gate signal; meanwhile this thread
-// moves the value to a new domain and queues its own scan first. The older scan is then queued last. Each time
-// the value is re-registered, the client sees it announced again, so the test counts the announcements.
-TEST_F(WsStreamingServerModuleTest, OlderScanQueuedLastDoesNotRestoreTheOldDomain)
-{
-    const auto context = NullContext();
-    const auto module = CreateModule(context);
-    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
-    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
-    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
-
-    const auto descriptor = DataDescriptorBuilder().setSampleType(SampleType::Float64).build();
-    const auto oldDomain = deviceImpl.addSignal("oldDomain", descriptor);
-    const auto newDomain = deviceImpl.addSignal("newDomain", descriptor);
-    const auto value = deviceImpl.addSignal("value", descriptor);
-    value.setDomainSignal(oldDomain);
-    // listed after the value signal: a scan held here has already read the value's domain
-    const auto gate = deviceImpl.addGateSignal("gate");
-    auto& gateImpl = static_cast<GateSignal&>(*gate.getObject());
-
-    // scan 1, from the constructor: the value is announced for the first time, with the old domain
-    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7665), context);
-    const auto valueId = value.getGlobalId().toStdString();
-    AvailableSignalsClient client{"ws://127.0.0.1:7665/"};
-    ASSERT_TRUE(client.waitAvailable(valueId));
-    // the I/O thread reads the gate's descriptor when it registers it; that must be over before the gate is armed
-    ASSERT_TRUE(client.waitAvailable(gate.getGlobalId().toStdString()));
-
-    // scan 2, on another thread: adding a signal starts a rescan that records the value with the old domain and
-    // stops at the gate, before it is queued
-    std::promise<void> release;
-    auto held = gateImpl.arm(release.get_future());
-    std::thread olderScan{[&] { deviceImpl.addTestSignal("trigger"); }};
-    const bool olderScanHeld = held.wait_for(5s) == std::future_status::ready;
-
-    // scan 3, on this thread: the domain change starts a rescan that records the new domain and is queued first;
-    // the gate is no longer armed, so it does not stop. The value is re-registered: second announcement
-    if (olderScanHeld)
-        value.setDomainSignal(newDomain);
-
-    // scan 2 finishes and is queued last. It must be dropped; applying it would re-register the value with the
-    // old domain (third announcement). Released and joined even if the gate was never reached: a joinable
-    // std::thread terminates the process when destroyed
-    release.set_value();
-    olderScan.join();
-    ASSERT_TRUE(olderScanHeld) << "the older scan never reached the gate signal";
-
-    // scan 4, queued after both. The client receives messages in order, so once the marker is announced every
-    // earlier scan has been applied. Had scan 2 restored the old domain, this scan would find the new one again
-    // and re-register the value once more (fourth announcement)
-    const auto markerId = deviceImpl.addTestSignal("marker");
-    ASSERT_TRUE(client.waitAvailable(markerId));
-
-    // the first announcement and the one for the domain change
-    EXPECT_EQ(client.announcementCount(valueId), 2u)
-        << "announced again after the domain change: the older scan re-registered the signal with the old domain "
-           "and the next scan re-registered it once more";
+    EXPECT_FALSE(client.isAvailable(missing.getGlobalId().toStdString()));
+    EXPECT_GE(static_cast<FaultySignal&>(*missing.getObject()).failures.load(), 1)
+        << "the I/O thread never read the descriptor, so nothing was tested";
 
     server.stop();
 }
 
 // A signal the I/O thread fails to register is skipped: the signals after it are still registered, and the
 // exception does not escape the I/O thread, which would terminate the process.
-TEST_F(WsStreamingServerModuleTest, SignalThatFailsToRegisterDoesNotStopTheOthers)
+TEST_F(WsStreamingServerTreeTest, SignalThatFailsToRegisterDoesNotStopTheOthers)
 {
-    const auto context = NullContext();
-    const auto module = CreateModule(context);
-    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
-    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
-    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
-
+    const auto tree = deviceImpl.addTestFolder("tree");
     auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7666), context);
-    auto& wsServer = static_cast<WsStreamingServer&>(*server.getObject()).getWsServer();
     AvailableSignalsClient client{"ws://127.0.0.1:7666/"};
 
-    std::promise<std::thread::id> ioThread;
-    boost::asio::post(wsServer.executor(), [&ioThread] { ioThread.set_value(std::this_thread::get_id()); });
-
-    // the descriptor can be read during the scan on this thread, but not when the I/O thread registers the signal
-    const auto faulty = deviceImpl.addFaultySignal("faulty", ioThread.get_future().get());
-    // the next scan lists the healthy signal after the faulty one, so both are registered in the same pass
-    const auto healthyId = deviceImpl.addTestSignal("healthy");
+    // built before it is part of the tree, so that one event adds both signals and one pass registers them in order
+    const auto group = Folder(context, tree, "group");
+    // the descriptor can be read during the scan, but not when the I/O thread registers the signal
+    const auto faulty = deviceImpl.addFaultySignalTo(group, "faulty", ioThreadOf(server));
+    const auto healthyId = deviceImpl.addSignalTo(group, "healthy").getGlobalId().toStdString();
+    tree.addItem(group);
 
     EXPECT_TRUE(client.waitAvailable(healthyId));
     // signals are registered in order, so the faulty one would have been announced before the healthy one
@@ -798,14 +789,8 @@ TEST_F(WsStreamingServerModuleTest, SignalThatFailsToRegisterDoesNotStopTheOther
 
 // A listener that cannot connect to its signal leaves that subscription without data, but the exception does not
 // escape the I/O thread, which would terminate the process; the server keeps serving the client.
-TEST_F(WsStreamingServerModuleTest, SubscriptionWhoseListenerFailsToConnectDoesNotStopTheServer)
+TEST_F(WsStreamingServerTreeTest, SubscriptionWhoseListenerFailsToConnectDoesNotStopTheServer)
 {
-    const auto context = NullContext();
-    const auto module = CreateModule(context);
-    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
-    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
-    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
-
     const auto faulty = deviceImpl.addFaultySignal("faulty");
     auto& faultyImpl = static_cast<FaultySignal&>(*faulty.getObject());
     faultyImpl.listenerConnectedFails = true;
@@ -825,42 +810,10 @@ TEST_F(WsStreamingServerModuleTest, SubscriptionWhoseListenerFailsToConnectDoesN
     server.stop();
 }
 
-// A signal is published only with a descriptor: one added without it is announced once the descriptor is set
-TEST_F(WsStreamingServerModuleTest, SignalIsAnnouncedOnceItGetsADescriptor)
-{
-    const auto context = NullContext();
-    const auto module = CreateModule(context);
-    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
-    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
-    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
-
-    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7668), context);
-    AvailableSignalsClient client{"ws://127.0.0.1:7668/"};
-
-    const auto late = deviceImpl.addSignal("late", nullptr);
-    const auto lateId = late.getGlobalId().toStdString();
-    // signals are registered in order, so the late one would be announced before the marker
-    const auto markerId = deviceImpl.addTestSignal("marker");
-    ASSERT_TRUE(client.waitAvailable(markerId));
-    ASSERT_FALSE(client.isAvailable(lateId)) << "the signal was published without a descriptor";
-
-    // the only change: no component is added or removed, no attribute changes
-    late.setDescriptor(DataDescriptorBuilder().setSampleType(SampleType::Float64).build());
-    EXPECT_TRUE(client.waitAvailable(lateId));
-
-    server.stop();
-}
-
 // Clients link a signal to its domain signal when it is announced. A value signal published before its domain signal
 // is announced again once the domain signal is published, so that clients can link the two.
-TEST_F(WsStreamingServerModuleTest, ValueSignalIsAnnouncedAgainOnceItsDomainSignalIsPublished)
+TEST_F(WsStreamingServerTreeTest, ValueSignalIsAnnouncedAgainOnceItsDomainSignalIsPublished)
 {
-    const auto context = NullContext();
-    const auto module = CreateModule(context);
-    auto device = createWithImplementation<IDevice, SignalAddingDevice>(context);
-    auto& deviceImpl = static_cast<SignalAddingDevice&>(*device.getObject());
-    device.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
-
     // without a descriptor the domain signal is not published, but the value signal is
     const auto domain = deviceImpl.addSignal("domain", nullptr);
     const auto value = deviceImpl.addSignal("value", DataDescriptorBuilder().setSampleType(SampleType::Float64).build());
@@ -887,6 +840,261 @@ TEST_F(WsStreamingServerModuleTest, ValueSignalIsAnnouncedAgainOnceItsDomainSign
     ASSERT_TRUE(client.waitAvailable(markerId));
     EXPECT_EQ(client.announcementCount(valueId), 2u)
         << "the value signal was not announced again, so clients keep it without its domain signal";
+
+    server.stop();
+}
+
+// One event reports a folder that is added with its signals, and one that it is removed with them.
+TEST_F(WsStreamingServerTreeTest, SignalsOfAFolderAreAnnouncedWhenItIsAddedAndWithdrawnWhenItIsRemoved)
+{
+    const auto tree = deviceImpl.addTestFolder("tree");
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7665), context);
+    AvailableSignalsClient client{"ws://127.0.0.1:7665/"};
+
+    // built before it is part of the tree, so that the event of the folder is the only one
+    const auto group = Folder(context, tree, "group");
+    const auto nested = Folder(context, group, "nested");
+    group.addItem(nested);
+    const auto aId = deviceImpl.addSignalTo(group, "a").getGlobalId().toStdString();
+    const auto bId = deviceImpl.addSignalTo(nested, "b").getGlobalId().toStdString();
+    tree.addItem(group);
+
+    ASSERT_TRUE(client.waitAvailable(aId));
+    ASSERT_TRUE(client.waitAvailable(bId));
+
+    tree.removeItem(group);
+    ASSERT_TRUE(client.waitWithdrawn(aId));
+    ASSERT_TRUE(client.waitWithdrawn(bId));
+
+    server.stop();
+}
+
+// The events of a component are muted while it is updated; one event reports the end of the update.
+TEST_F(WsStreamingServerTreeTest, UpdatedFolderKeepsItsUnchangedSignals)
+{
+    const auto tree = deviceImpl.addTestFolder("tree");
+
+    const auto keptId = deviceImpl.addSignalTo(tree, "kept").getGlobalId().toStdString();
+    const auto removed = deviceImpl.addSignalTo(tree, "removed");
+    const auto replaced = deviceImpl.addSignalTo(tree, "replaced");
+    const auto replacedId = replaced.getGlobalId().toStdString();
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7670), context);
+    AvailableSignalsClient client{"ws://127.0.0.1:7670/"};
+    ASSERT_TRUE(client.waitAvailable(keptId));
+    ASSERT_TRUE(client.waitAvailable(replacedId));
+
+    tree.asPtr<IPropertyObjectInternal>().disableCoreEventTrigger();
+    tree.removeItem(removed);
+    tree.removeItem(replaced);
+    deviceImpl.addSignalTo(tree, "replaced");
+    const auto addedId = deviceImpl.addSignalTo(tree, "added").getGlobalId().toStdString();
+    tree.asPtr<IPropertyObjectInternal>().enableCoreEventTrigger();
+    deviceImpl.reportCoreEvent(tree, CoreEventArgsComponentUpdateEnd());
+
+    ASSERT_TRUE(client.waitAvailable(addedId));
+    EXPECT_EQ(client.withdrawalCount(removed.getGlobalId().toStdString()), 1u);
+    EXPECT_EQ(client.announcementCount(replacedId), 2u) << "the signal that took the place of a removed one was not announced";
+    EXPECT_EQ(client.withdrawalCount(keptId), 0u) << "a signal the update left alone was withdrawn, which ends its subscriptions";
+
+    server.stop();
+}
+
+// A signal is announced again when its domain signal changes, and only then.
+TEST_F(WsStreamingServerTreeTest, SignalIsAnnouncedAgainOnlyWhenItsDomainSignalChanges)
+{
+    const auto descriptor = DataDescriptorBuilder().setSampleType(SampleType::Float64).build();
+    const auto domain = deviceImpl.addSignal("domain", descriptor);
+    const auto otherDomain = deviceImpl.addSignal("otherDomain", descriptor);
+    const auto value = deviceImpl.addSignal("value", descriptor);
+    value.setDomainSignal(domain);
+    const auto valueId = value.getGlobalId().toStdString();
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7671), context);
+    AvailableSignalsClient client{"ws://127.0.0.1:7671/"};
+    ASSERT_TRUE(client.waitAvailable(valueId));
+
+    // changes that do not affect what is published
+    value.setName("renamed");
+    value.setActive(false);
+    value.setDescriptor(DataDescriptorBuilder().setSampleType(SampleType::Float32).build());
+    ASSERT_TRUE(client.waitAvailable(deviceImpl.addTestSignal("first")));
+    EXPECT_EQ(client.announcementCount(valueId), 1u);
+
+    value.setDomainSignal(otherDomain);
+    ASSERT_TRUE(client.waitAvailable(deviceImpl.addTestSignal("second")));
+    EXPECT_EQ(client.announcementCount(valueId), 2u);
+
+    server.stop();
+}
+
+// openDAQ clears a removed domain signal from the signals that use it and reports no event for them. They are announced
+// again, without it: clients would otherwise keep them linked to a signal that is gone, or to a later one with its id.
+TEST_F(WsStreamingServerTreeTest, ValueSignalIsAnnouncedAgainWhenItsDomainSignalIsRemoved)
+{
+    const auto tree = deviceImpl.addTestFolder("tree");
+    const auto domain = deviceImpl.addSignalTo(tree, "domain");
+    const auto value = deviceImpl.addSignalTo(tree, "value");
+    value.setDomainSignal(domain);
+    const auto valueId = value.getGlobalId().toStdString();
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7682), context);
+    AvailableSignalsClient client{"ws://127.0.0.1:7682/"};
+    ASSERT_TRUE(client.waitAvailable(valueId));
+
+    tree.removeItem(domain);
+    ASSERT_TRUE(client.waitWithdrawn(domain.getGlobalId().toStdString()));
+    ASSERT_FALSE(value.getDomainSignal().assigned()) << "openDAQ did not clear the removed domain signal, so nothing was tested";
+
+    // the value signal is announced again by the pass that withdraws its domain signal; the marker is announced after it
+    ASSERT_TRUE(client.waitAvailable(deviceImpl.addTestSignal("marker")));
+    EXPECT_EQ(client.announcementCount(valueId), 2u) << "the value signal is still published with the removed domain signal";
+
+    // a signal that takes the id of the removed one is not the domain signal of the value signal
+    ASSERT_TRUE(client.waitAvailable(deviceImpl.addSignalTo(tree, "domain").getGlobalId().toStdString()));
+    ASSERT_TRUE(client.waitAvailable(deviceImpl.addTestSignal("secondMarker")));
+    EXPECT_EQ(client.announcementCount(valueId), 2u);
+
+    server.stop();
+}
+
+// A thread holds a lock of the tree until a core event that another thread reports has returned. Reading the tree on
+// the reporting thread would wait for that lock and never return.
+TEST_F(WsStreamingServerTreeTest, CoreEventDoesNotWaitForALockOfTheTreeHeldByAnotherThread)
+{
+    const auto other = deviceImpl.addTestFolder("other");
+    const auto descriptor = DataDescriptorBuilder().setSampleType(SampleType::Float64).build();
+    const auto domain = deviceImpl.addSignal("domain", descriptor);
+    const auto value = deviceImpl.addSignal("value", descriptor);
+    const auto valueId = value.getGlobalId().toStdString();
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7672), context);
+    AvailableSignalsClient client{"ws://127.0.0.1:7672/"};
+    ASSERT_TRUE(client.waitAvailable(valueId));
+
+    Watchdog watchdog{"A core event waits for a lock of the tree that another thread holds until the event is reported"};
+    std::promise<void> otherLocked;
+    std::promise<void> reported;
+    std::thread otherThread{[&]
+    {
+        const auto otherLock = other.asPtr<IPropertyObjectInternal>().getRecursiveLockGuard();
+        otherLocked.set_value();
+        reported.get_future().wait();
+    }};
+
+    otherLocked.get_future().wait();
+    value.setDomainSignal(domain);
+    reported.set_value();
+    otherThread.join();
+
+    // the event was not lost: the signal is announced again, now with its domain signal
+    ASSERT_TRUE(client.waitAvailable(deviceImpl.addTestSignal("marker")));
+    EXPECT_EQ(client.announcementCount(valueId), 2u);
+
+    server.stop();
+}
+
+// Several threads change the tree at once: what the server publishes in the end is what the tree holds.
+TEST_F(WsStreamingServerTreeTest, ChangesFromSeveralThreadsAreAllPublished)
+{
+    constexpr int threadCount = 4;
+    constexpr int rounds = 100;
+    std::vector<FolderConfigPtr> folders;
+    for (int t = 0; t < threadCount; ++t)
+        folders.push_back(deviceImpl.addTestFolder("t" + std::to_string(t)));
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7674), context);
+    AvailableSignalsClient client{"ws://127.0.0.1:7674/"};
+
+    // every round leaves one more signal in the folder of the thread, and removes another one right after adding it
+    std::vector<std::thread> threads;
+    for (int t = 0; t < threadCount; ++t)
+        threads.emplace_back([&, t]
+        {
+            for (int i = 0; i < rounds; ++i)
+            {
+                deviceImpl.addSignalTo(folders[t], "kept" + std::to_string(i));
+                folders[t].removeItem(deviceImpl.addSignalTo(folders[t], "removed"));
+            }
+        });
+    for (auto& thread : threads)
+        thread.join();
+
+    // changes are published in the order they were reported, so the marker is announced last
+    ASSERT_TRUE(client.waitAvailable(deviceImpl.addTestSignal("marker")));
+
+    for (const auto& folder : folders)
+    {
+        const auto folderId = folder.getGlobalId().toStdString();
+        for (int i = 0; i < rounds; ++i)
+            EXPECT_EQ(client.announcementCount(folderId + "/kept" + std::to_string(i)), 1u) << folderId << " kept" << i;
+
+        EXPECT_EQ(client.announcementCount(folderId + "/removed"), client.withdrawalCount(folderId + "/removed"))
+            << "a removed signal is still published";
+    }
+
+    server.stop();
+}
+
+// Core events keep arriving while the server stops and is destroyed.
+TEST_F(WsStreamingServerTreeTest, ServerStopsWhileTheTreeChanges)
+{
+    const auto tree = deviceImpl.addTestFolder("tree");
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7675), context);
+    Watchdog watchdog{"Stopping the server while the tree changes does not return"};
+
+    std::atomic<bool> stop{false};
+    std::thread changer{[&]
+    {
+        for (int i = 0; !stop; ++i)
+            tree.removeItem(deviceImpl.addSignalTo(tree, "s" + std::to_string(i % 16)));
+    }};
+
+    std::this_thread::sleep_for(100ms);
+    server.stop();
+    server.release();
+
+    stop = true;
+    changer.join();
+}
+
+// The event that reports the server as added names the server. A scan of it that is still queued when the server
+// stops would keep the server alive for good, and one that is running would destroy the server on its own scan thread.
+TEST_F(WsStreamingServerTreeTest, ServerIsNotKeptAliveByTheEventOfItsOwnAddition)
+{
+    const auto tree = deviceImpl.addTestFolder("tree");
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7678), context);
+    const WeakRefPtr<IServer> weakServer = server;
+    Watchdog watchdog{"A server that was reported as added does not stop"};
+
+    {
+        const auto treeLock = tree.asPtr<IPropertyObjectInternal>().getRecursiveLockGuard();
+
+        // a read of the tree that waits for the lock held here, and the event of the server queued behind it
+        deviceImpl.reportCoreEvent(device, CoreEventArgsComponentUpdateEnd());
+        deviceImpl.reportCoreEvent(device, CoreEventArgsComponentAdded(server));
+        std::this_thread::sleep_for(200ms);
+        server.stop();
+    }
+
+    server.release();
+    ASSERT_FALSE(weakServer.getRef().assigned()) << "the server is still referenced after its last reference was released";
+}
+
+// A signal that is added while the server reads the tree for the first time is reported by an event, not found by that read.
+TEST_F(WsStreamingServerTreeTest, SignalAddedWhileTheServerStartsIsAnnounced)
+{
+    std::string addedId;
+    deviceImpl.addHookSignal("hook", [&] { addedId = deviceImpl.addTestSignal("added"); });
+    ASSERT_TRUE(addedId.empty()) << "the descriptor of the hook signal was read before the server started";
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7679), context);
+    AvailableSignalsClient client{"ws://127.0.0.1:7679/"};
+    ASSERT_FALSE(addedId.empty()) << "the first read of the tree did not reach the signal that adds another one";
+    ASSERT_TRUE(client.waitAvailable(addedId));
 
     server.stop();
 }
