@@ -929,6 +929,36 @@ TEST_F(WsStreamingServerTreeTest, SignalIsAnnouncedAgainOnlyWhenItsDomainSignalC
     server.stop();
 }
 
+// openDAQ clears a removed domain signal from the signals that use it and reports no event for them. They are announced
+// again, without it: clients would otherwise keep them linked to a signal that is gone, or to a later one with its id.
+TEST_F(WsStreamingServerTreeTest, ValueSignalIsAnnouncedAgainWhenItsDomainSignalIsRemoved)
+{
+    const auto tree = deviceImpl.addTestFolder("tree");
+    const auto domain = deviceImpl.addSignalTo(tree, "domain");
+    const auto value = deviceImpl.addSignalTo(tree, "value");
+    value.setDomainSignal(domain);
+    const auto valueId = value.getGlobalId().toStdString();
+
+    auto server = createWithImplementation<IServer, WsStreamingServer>(device, CreateWsOnlyConfig(module, 7682), context);
+    AvailableSignalsClient client{"ws://127.0.0.1:7682/"};
+    ASSERT_TRUE(client.waitAvailable(valueId));
+
+    tree.removeItem(domain);
+    ASSERT_TRUE(client.waitWithdrawn(domain.getGlobalId().toStdString()));
+    ASSERT_FALSE(value.getDomainSignal().assigned()) << "openDAQ did not clear the removed domain signal, so nothing was tested";
+
+    // the value signal is announced again by the pass that withdraws its domain signal; the marker is announced after it
+    ASSERT_TRUE(client.waitAvailable(deviceImpl.addTestSignal("marker")));
+    EXPECT_EQ(client.announcementCount(valueId), 2u) << "the value signal is still published with the removed domain signal";
+
+    // a signal that takes the id of the removed one is not the domain signal of the value signal
+    ASSERT_TRUE(client.waitAvailable(deviceImpl.addSignalTo(tree, "domain").getGlobalId().toStdString()));
+    ASSERT_TRUE(client.waitAvailable(deviceImpl.addTestSignal("secondMarker")));
+    EXPECT_EQ(client.announcementCount(valueId), 2u);
+
+    server.stop();
+}
+
 // A thread holds a lock of the tree until a core event that another thread reports has returned. Reading the tree on
 // the reporting thread would wait for that lock and never return.
 TEST_F(WsStreamingServerTreeTest, CoreEventDoesNotWaitForALockOfTheTreeHeldByAnotherThread)

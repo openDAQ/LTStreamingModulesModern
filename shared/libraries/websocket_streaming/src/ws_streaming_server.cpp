@@ -687,12 +687,16 @@ void WsStreamingServer::onCoreEvent(
 // Withdraws the signals that were removed from the tree and registers the ones read by a scan
 void WsStreamingServer::applySignals(const std::vector<SignalSnapshot>& snapshots)
 {
+    // the signals this pass withdraws or registers
+    std::set<std::string> changed;
+
     auto it = _localSignals.begin();
     while (it != _localSignals.end())
     {
         if (it->second.openDaqSignal.isRemoved())
         {
             auto jt = it++;
+            changed.insert(jt->first);
             _server.remove_local_signal(*jt->second.localSignal);
             _localSignals.erase(jt);
         }
@@ -702,15 +706,14 @@ void WsStreamingServer::applySignals(const std::vector<SignalSnapshot>& snapshot
     }
 
     // An exception must not leave the I/O thread, and a signal that cannot be registered must not hide the others
-    const auto registerAll = [this](const std::vector<SignalSnapshot>& list)
+    const auto registerAll = [this, &changed](const std::vector<SignalSnapshot>& list)
     {
-        std::set<std::string> registered;
         for (const auto& snapshot : list)
         {
             try
             {
                 if (createListener(snapshot))
-                    registered.insert(snapshot.id);
+                    changed.insert(snapshot.id);
             }
             catch (const std::exception& e)
             {
@@ -721,20 +724,20 @@ void WsStreamingServer::applySignals(const std::vector<SignalSnapshot>& snapshot
                 LOG_W("Signal {} cannot be published", snapshot.id);
             }
         }
-
-        return registered;
     };
 
-    const auto registered = registerAll(snapshots);
-    if (registered.empty())
+    registerAll(snapshots);
+    if (changed.empty())
         return;
 
-    // Clients link a signal to its domain when it is announced, so the signals that use a signal registered just now as
-    // their domain are announced again. They can be anywhere in the tree; createListener skips those that are up to date.
+    // Clients link a signal to its domain when it is announced, so the signals that use a signal withdrawn or registered
+    // just now as their domain are announced again. Their domain is read here: openDAQ clears a removed domain signal from
+    // the signals that use it without an event, and a scan of a changed domain may still be queued. They can be anywhere
+    // in the tree; createListener skips those that are up to date.
     std::vector<SignalSnapshot> users;
     for (const auto& [id, entry] : _localSignals)
-        if (registered.count(entry.domainId))
-            users.push_back({entry.openDaqSignal, entry.domainSignal, id});
+        if (changed.count(entry.domainId))
+            users.push_back({entry.openDaqSignal, entry.openDaqSignal.getDomainSignal(), id});
 
     registerAll(users);
 }
