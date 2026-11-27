@@ -20,7 +20,9 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/signals2/connection.hpp>
 #include <boost/system/error_code.hpp>
@@ -81,7 +83,17 @@ class WsStreamingServer : public Server
         void addCapability();
         void removeCapability();
 
-        void createListener(const SignalPtr& signal);
+        // A signal as read from the device tree, so the I/O thread can register it without the tree's locks
+        struct SignalSnapshot
+        {
+            SignalPtr signal;
+            SignalPtr domainSignal;
+            std::string id;
+        };
+
+        void scan(const ComponentPtr& component);
+        std::vector<SignalSnapshot> scanSignals(const ComponentPtr& component);
+        bool createListener(const SignalSnapshot& snapshot);
 
         void onClientConnected(
             const wss::connection_ptr& connection);
@@ -94,23 +106,7 @@ class WsStreamingServer : public Server
             ComponentPtr& component,
             CoreEventArgsPtr& args);
 
-        void onComponentAdded(
-            ComponentPtr& component,
-            CoreEventArgsPtr& args);
-
-        void onComponentRemoved(
-            ComponentPtr& component,
-            CoreEventArgsPtr& args);
-
-        void onComponentUpdateEnd(
-            ComponentPtr& component,
-            CoreEventArgsPtr& args);
-
-        void onAttributeChanged(
-            ComponentPtr& component,
-            CoreEventArgsPtr& args);
-
-        void rescan();
+        void applySignals(const std::vector<SignalSnapshot>& snapshots);
 
     private:
 
@@ -129,13 +125,22 @@ class WsStreamingServer : public Server
             SignalPtr openDaqSignal;
             InputPortNotificationsPtr listener;
             SignalPtr domainSignal;
+            // The domain signal's registration at the time this signal was registered; empty if the domain
+            // signal was not registered then (e.g. it had no descriptor yet).
+            std::weak_ptr<wss::local_signal> domainLocalSignal;
+            std::string domainId;
         };
 
         DevicePtr _rootDevice;
+        LoggerComponentPtr loggerComponent;
         boost::asio::io_context _ioc;
         wss::server _server;
         std::thread _thread;
         std::map<std::string, StreamableSignal> _localSignals;
+        // Reads the device tree: core events are reported under its locks, and the I/O thread is joined under them
+        boost::asio::io_context _scanIoc;
+        boost::asio::executor_work_guard<boost::asio::io_context::executor_type> _scanWork{_scanIoc.get_executor()};
+        std::thread _scanThread;
         Int _ws_port{0};
         Int _wss_port{0};
         std::string _path;

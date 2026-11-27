@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <string>
 
+#include <coreobjects/core_event_args_impl.h>
 #include <opendaq/mirrored_signal_impl.h>
 #include <opendaq/opendaq.h>
 
@@ -51,6 +52,19 @@ StringPtr WsStreamingSignal::onGetRemoteId() const
 Bool WsStreamingSignal::onTriggerEvent(const EventPacketPtr& eventPacket)
 {
     return Self::onTriggerEvent(eventPacket);
+}
+
+void WsStreamingSignal::linkDomainSignal(const MirroredSignalConfigPtr& domainSignal)
+{
+    checkErrorInfo(setMirroredDomainSignal(domainSignal));
+
+    // servers that forward this signal and applications learn of the link only from this event
+    if (!this->coreEventMuted && this->coreEvent.assigned())
+    {
+        this->triggerCoreEvent(createWithImplementation<ICoreEventArgs, CoreEventArgsImpl>(
+            CoreEventId::AttributeChanged,
+            Dict<IString, IBaseObject>({{"AttributeName", "DomainSignal"}, {"DomainSignal", domainSignal}})));
+    }
 }
 
 SignalPtr WsStreamingSignal::onGetDomainSignal()
