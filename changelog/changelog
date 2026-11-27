@@ -2,6 +2,13 @@
 
 ## Bug fixes
 
+- [#36](https://github.com/openDAQ/LTStreamingModulesModern/pull/36) Release the metadata-fetch subscription when a signal is published, and link a value signal to a domain signal published after it, replacing the fetch retry, the publication deferral and the subscription hand-over of #16 and #19; fixes data that stopped after readers were recreated on the digiBOX, the T100 and the FusionLN.
+- [#36](https://github.com/openDAQ/LTStreamingModulesModern/pull/36) Run subscribe and unsubscribe requests in the order openDAQ makes them, and pass data to a reader only after the device acknowledges the latest subscribe, fixing a gap in the domain values when a reader subscribes again.
+- [#36](https://github.com/openDAQ/LTStreamingModulesModern/pull/36) Hold a subscribe until the device acknowledges the unsubscribe it is still running, fixing subscribes that the T100 dropped when a reader was recreated.
+- [#36](https://github.com/openDAQ/LTStreamingModulesModern/pull/36) Raise the core event of a local signal when its domain signal is linked after publication, so LT and native servers that forward the signal announce the link.
+- [#36](https://github.com/openDAQ/LTStreamingModulesModern/pull/36) Connect the streaming after its device has connected its handlers, and stop the streaming's I/O thread when the device is removed, fixing an abort when the last reference was released on that thread.
+- [#36](https://github.com/openDAQ/LTStreamingModulesModern/pull/36) Register LT server signals with ws-streaming on its I/O thread, and catch registration and subscription failures there instead of terminating the process.
+- [#38](https://github.com/openDAQ/LTStreamingModulesModern/pull/38) Read only the part of the device tree a core event names, on a thread of the LT server that holds none of the tree's locks, fixing deadlocks with threads that hold a component lock while they raise the event; value signals are announced again when their domain signal is registered, withdrawn or changed.
 - [#35](https://github.com/openDAQ/LTStreamingModulesModern/pull/35) Link a signal to its hidden domain signal through a `relatedSignals` entry of type `domain`, the LT streaming specification's relation type, fixing devices whose signals had no domain signal; type `time` is still accepted.
 - [#35](https://github.com/openDAQ/LTStreamingModulesModern/pull/35) Take a linear domain signal's rule start only from the openDAQ `interpretation`, not from the LT streaming specification's `linear.start`, which is the absolute value of the next sample, fixing doubled timestamps from devices that send it.
 - [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Resolve hidden domain (time) signals referenced via the `relatedSignals` metadata element, fixing devices that connected successfully but delivered no data (signals had no domain signal).
@@ -15,6 +22,7 @@
 
 ## Misc
 
+- [#36](https://github.com/openDAQ/LTStreamingModulesModern/pull/36) Bump ws-streaming to v3.2.1, which sends each HTTP command-interface request once and one at a time with a bounded connect, and keeps announcing signals past a client whose write fails.
 - [#35](https://github.com/openDAQ/LTStreamingModulesModern/pull/35) Bump ws-streaming to v3.1.3, which takes a time signal's origin from `absoluteReference` (LT streaming specification) when the device sends no `origin`, and no longer reads the specification's `linear.start` as a rule start.
 - [#16](https://github.com/openDAQ/LTStreamingModulesModern/pull/16) Bump ws-streaming to v3.1.1, fixing warnings-as-errors builds (GCC `-Werror=reorder`, MSVC `/WX` C5038).
 
